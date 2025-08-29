@@ -275,9 +275,14 @@ async def convert_universal(
                 langs=_langs,
                 table_mode=DEFAULT_TABLE_MODE,
             )
+            _conv_kwargs = (
+                {"max_num_pages": max_pages}
+                if isinstance(max_pages, int)
+                else {}
+            )
             res_no = conv_no.convert(
                 DocumentStream(name=filename, stream=io.BytesIO(in_bytes)),
-                max_num_pages=max_pages,
+                **_conv_kwargs,
             )
             doc_no = res_no.document
             md_no = (
@@ -330,7 +335,7 @@ async def convert_universal(
                             name=f"psm{psm}-" + filename,
                             stream=io.BytesIO(in_bytes),
                         ),
-                        max_num_pages=max_pages,
+                        **_conv_kwargs,
                     )
                     doc_psm = res_psm.document
                     md_psm = (
@@ -405,7 +410,11 @@ async def convert_universal(
         )
         res = conv.convert(
             DocumentStream(name=filename, stream=io.BytesIO(in_bytes)),
-            max_num_pages=max_pages,
+            **(
+                {"max_num_pages": max_pages}
+                if isinstance(max_pages, int)
+                else {}
+            ),
         )
         dl_doc = res.document
         md = (
