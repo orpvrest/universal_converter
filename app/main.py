@@ -3,8 +3,8 @@
 Сервис конвертирует офисные документы, PDF и изображения в структурированный
 вид (Markdown и/или JSON) с использованием Docling. Поддерживается
 автоопределение формата, при необходимости — конвертация устаревших форматов
-через LibreOffice (.doc/.xls/.ppt → OOXML) и подбор стратегии OCR (Tesseract)
-для «изобразительных» входов.
+через LibreOffice (.doc/.xls/.ppt → OOXML) и выбор стратегии OCR (Tesseract)
+для «изобразительных» входов (без перебора PSM).
 
 Переменные окружения:
     UVICORN_HOST (str): Хост для uvicorn. По умолчанию: 0.0.0.0
@@ -23,9 +23,8 @@
 
     POST /convert
         Универсальный эндпоинт со стратегией по типу файла:
-        - .doc/.xls/.ppt → LibreOffice → OOXML → Docling (без OCR)
-                - PDF/изображения → без OCR, затем принудительный OCR c PSM;
-                    выбор лучшего
+    - .doc/.xls/.ppt → LibreOffice → OOXML → Docling (без OCR)
+    - PDF/изображения → без OCR, затем принудительный OCR; выбор лучшего
         - OOXML/HTML/MD/CSV → Docling (без OCR)
 """
 
@@ -50,7 +49,7 @@ from docling.datamodel.pipeline_options import (
     TableFormerMode,
 )
 
-app = FastAPI(title="Docling microservice", version="3.0.0")
+app = FastAPI(title="Docling microservice", version="3.1.0")
 
 DOCLING_ARTIFACTS_PATH = os.getenv("DOCLING_ARTIFACTS_PATH", None)
 DEFAULT_TABLE_MODE = os.getenv("DOCLING_TABLE_MODE", "ACCURATE").upper()
@@ -106,7 +105,6 @@ def build_pdf_converter(
     force_ocr: bool,
     langs: list[str],
     table_mode: str,
-    psm: Optional[int] = None,
 ) -> DocumentConverter:
     """Собирает DocumentConverter для PDF/изображений.
 
@@ -114,7 +112,6 @@ def build_pdf_converter(
         force_ocr: Принудительный полностраничный OCR.
         langs: Языки OCR (например, ["rus", "eng"]).
         table_mode: Режим извлечения таблиц (например, "ACCURATE").
-        psm: Необязательный PSM (режим сегментации страниц) для Tesseract.
 
     Returns:
         DocumentConverter, настроенный для обработки PDF/изображений.
@@ -132,14 +129,6 @@ def build_pdf_converter(
             lang=langs,
             force_full_page_ocr=True,
         )
-        if psm is not None:
-            if hasattr(ocr_opts, "page_seg_mode"):
-                ocr_opts.page_seg_mode = int(psm)
-            else:
-                ocr_opts.extra_args = (ocr_opts.extra_args or []) + [
-                    "--psm",
-                    str(psm),
-                ]
         pipe.ocr_options = ocr_opts
     else:
         pipe.do_ocr = True
@@ -184,7 +173,8 @@ def health():
     """
     return {"ok": True}
 
-# Универсальный эндпоинт: автоопределение + конвертация legacy + OCR PSM sweep
+# Универсальный эндпоинт: автоопределение + конвертация legacy +
+# OCR без перебора PSM
 
 
 @app.post("/convert", response_model=ConvertResponse)
@@ -192,7 +182,6 @@ async def convert_universal(
     file: UploadFile = File(...),
     out: Literal["markdown", "json", "both"] = Form("both"),
     langs: Optional[str] = Form(None),              # "rus,eng" | "auto"
-    psm_list: str = Form("6,4,11"),               # PSM для OCR-форматов
     max_pages: Optional[int] = Form(None),
 ):
     """Универсальная конвертация документов с авто-стратегией.
@@ -202,7 +191,6 @@ async def convert_universal(
         out: Формат вывода: "markdown", "json" или "both".
         langs: Языки OCR (строка, например "rus,eng"). Если None — берём из
             переменной окружения DOCLING_LANGS.
-        psm_list: Список PSM для Tesseract, через запятую (например, "6,4,11").
         max_pages: Ограничение по количеству страниц для обработки (или None).
 
     Returns:
@@ -304,10 +292,10 @@ async def convert_universal(
 
         trials = []
 
-        # 2) PDF/изображение → стратегии: no-force-OCR vs force-OCR (PSM sweep)
+        # 2) PDF/изображение → стратегии: no-force-OCR vs force-OCR
         if is_pdf(lower) or is_image(lower):
             best_doc = None
-            best_tag = None   # 'no_ocr' | 'psm:<n>'
+            best_tag = None   # 'no_ocr' | 'force_ocr'
             best_score = -1.0
 
             # (a) Без принудительного OCR (Docling сам решит)
@@ -354,69 +342,59 @@ async def convert_universal(
             if score_no > best_score:
                 best_score, best_tag, best_doc = score_no, 'no_ocr', doc_no
 
-            # (б) Force OCR + PSM candidates
-            candidates = [x.strip() for x in psm_list.split(",") if x.strip()]
+            # (б) Принудительный полностраничный OCR
             try:
-                psm_candidates = [int(x) for x in candidates]
-            except Exception:
-                psm_candidates = [6, 4, 11]
-            if not psm_candidates:
-                psm_candidates = [6, 4, 11]
-
-            for psm in psm_candidates:
-                try:
-                    conv_psm = build_pdf_converter(
-                        force_ocr=True,
-                        langs=_langs,
-                        table_mode=DEFAULT_TABLE_MODE,
-                        psm=psm,
+                conv_force = build_pdf_converter(
+                    force_ocr=True,
+                    langs=_langs,
+                    table_mode=DEFAULT_TABLE_MODE,
+                )
+                res_force = conv_force.convert(
+                    DocumentStream(
+                        name="force-ocr-" + filename,
+                        stream=io.BytesIO(in_bytes),
+                    ),
+                    **_conv_kwargs,
+                )
+                doc_force = res_force.document
+                md_force = (
+                    doc_force.export_to_markdown()
+                    if out in ("markdown", "both")
+                    else ""
+                )
+                text_force = md_force if isinstance(md_force, str) else ""
+                total_f = len(text_force)
+                if total_f > 0:
+                    cyr_f = sum(
+                        1
+                        for ch in text_force
+                        if ("А" <= ch <= "я") or ch in "Ёё"
                     )
-                    res_psm = conv_psm.convert(
-                        DocumentStream(
-                            name=f"psm{psm}-" + filename,
-                            stream=io.BytesIO(in_bytes),
-                        ),
-                        **_conv_kwargs,
+                    cyr_ratio_f = cyr_f / total_f
+                    score_f = total_f * (0.6 + 0.4 * cyr_ratio_f)
+                else:
+                    cyr_ratio_f, score_f = 0.0, 0.0
+                trials.append(
+                    {
+                        "strategy": "force_ocr",
+                        "length": total_f,
+                        "cyr_ratio": round(cyr_ratio_f, 3),
+                        "score": round(score_f, 3),
+                    }
+                )
+                if score_f > best_score:
+                    best_score, best_tag, best_doc = (
+                        score_f,
+                        "force_ocr",
+                        doc_force,
                     )
-                    doc_psm = res_psm.document
-                    md_psm = (
-                        doc_psm.export_to_markdown()
-                        if out in ("markdown", "both")
-                        else ""
-                    )
-                    text_psm = md_psm if isinstance(md_psm, str) else ""
-                    total = len(text_psm)
-                    if total > 0:
-                        cyr = sum(
-                            1
-                            for ch in text_psm
-                            if ("А" <= ch <= "я") or ch in "Ёё"
-                        )
-                        cyr_ratio = cyr / total
-                        score = total * (0.6 + 0.4 * cyr_ratio)
-                    else:
-                        cyr_ratio, score = 0.0, 0.0
-                    trials.append(
-                        {
-                            "strategy": f"psm:{psm}",
-                            "length": total,
-                            "cyr_ratio": round(cyr_ratio, 3),
-                            "score": round(score, 3),
-                        }
-                    )
-                    if score > best_score:
-                        best_score, best_tag, best_doc = (
-                            score,
-                            f"psm:{psm}",
-                            doc_psm,
-                        )
-                except Exception as e:
-                    trials.append(
-                        {
-                            "strategy": f"psm:{psm}",
-                            "error": str(e),
-                        }
-                    )
+            except Exception as e:
+                trials.append(
+                    {
+                        "strategy": "force_ocr",
+                        "error": str(e),
+                    }
+                )
 
             if best_doc is None:
                 raise HTTPException(500, detail="All strategies failed")

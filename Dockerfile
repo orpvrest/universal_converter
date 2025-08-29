@@ -15,7 +15,24 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-RUN mkdir -p /opt/docling-models
+# Prefetch Docling models at build time to speed up first run
+RUN python - <<'PY'
+from pathlib import Path
+from docling.utils.model_downloader import download_models
+
+out = Path('/opt/docling-models')
+out.mkdir(parents=True, exist_ok=True)
+download_models(
+    output_dir=out,
+    progress=False,
+    with_layout=True,
+    with_tableformer=True,
+    with_code_formula=True,
+    with_picture_classifier=True,
+    with_easyocr=True,
+)
+print('Docling models prefetched to', out)
+PY
 
 COPY app ./app
 EXPOSE 8088
