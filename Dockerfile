@@ -16,11 +16,33 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 RUN mkdir -p /opt/docling-models && python - <<'PY'
-from docling.utils.model_downloader import download_models
 import os
+from docling.utils.model_downloader import download_models
+
 models_dir = "/opt/docling-models"
 os.makedirs(models_dir, exist_ok=True)
-download_models(target_dir=models_dir)
+
+# Совместимость с разными версиями Docling: именование аргумента могло меняться.
+downloaded = False
+for kwargs in (
+    {"target_dir": models_dir},
+    {"target_path": models_dir},
+    {},  # попробуем позиционный вызов
+):
+    try:
+        if kwargs:
+            download_models(**kwargs)
+        else:
+            download_models(models_dir)
+        downloaded = True
+        break
+    except TypeError:
+        pass
+
+if not downloaded:
+    # Последняя попытка: простой позиционный вызов (на случай других сигнатур)
+    download_models(models_dir)
+
 print("Prefetched Docling models to:", models_dir)
 PY
 
