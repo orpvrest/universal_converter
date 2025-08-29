@@ -87,7 +87,6 @@ def build_pdf_converter(
     # force full-page
     if force_ocr:
         pipe.do_ocr = True
-        pipe.force_full_page_ocr = True
         ocr_opts = TesseractCliOcrOptions(
             lang=langs,
             force_full_page_ocr=True,
@@ -103,7 +102,6 @@ def build_pdf_converter(
         pipe.ocr_options = ocr_opts
     else:
         pipe.do_ocr = True
-        pipe.force_full_page_ocr = False
         ocr_opts = TesseractCliOcrOptions(
             lang=langs,
             force_full_page_ocr=False,
@@ -117,7 +115,8 @@ def build_pdf_converter(
 
     return DocumentConverter(
         format_options={
-            InputFormat.PDF: PdfFormatOption(pipeline_options=pipe)
+            InputFormat.PDF: PdfFormatOption(pipeline_options=pipe),
+            InputFormat.IMAGE: PdfFormatOption(pipeline_options=pipe),
         }
     )
 
