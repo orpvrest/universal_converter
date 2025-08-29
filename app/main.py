@@ -63,6 +63,44 @@ DEFAULT_LANGS = [
 MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "80"))
 
 
+# Ленивая проверка/загрузка моделей в DOCLING_ARTIFACTS_PATH при необходимости
+_MODELS_READY = False
+
+
+def ensure_models() -> None:
+    global _MODELS_READY
+    if _MODELS_READY:
+        return
+    if not DOCLING_ARTIFACTS_PATH:
+        # Пусть Docling использует дефолтный кэш
+        _MODELS_READY = True
+        return
+    try:
+        from pathlib import Path
+        from docling.utils.model_downloader import download_models
+
+        root = Path(DOCLING_ARTIFACTS_PATH)
+        root.mkdir(parents=True, exist_ok=True)
+
+    # Признак наличия скачанных моделей: хотя бы один
+    # model.safetensors в подпапках
+        has_any_model = any(root.rglob("model.safetensors"))
+        if not has_any_model:
+            download_models(
+                output_dir=root,
+                progress=False,
+                with_layout=True,
+                with_tableformer=True,
+                with_code_formula=True,
+                with_picture_classifier=True,
+                with_easyocr=True,
+            )
+        _MODELS_READY = True
+    except Exception:
+        # Не блокируем: Docling попробует скачать сам в дефолтный кэш
+        _MODELS_READY = True
+
+
 # Вспомогательная функция для сборки DocumentConverter под PDF/изображения
 def build_pdf_converter(
     force_ocr: bool,
@@ -81,6 +119,9 @@ def build_pdf_converter(
     Returns:
         DocumentConverter, настроенный для обработки PDF/изображений.
     """
+    # Убедиться, что модели есть (или будут скачаны в указанный артефакт-путь)
+    ensure_models()
+
     pipe = PdfPipelineOptions(artifacts_path=DOCLING_ARTIFACTS_PATH)
 
     # When not forcing OCR, let Docling decide; still pass langs but don't
