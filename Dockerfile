@@ -1,0 +1,29 @@
+FROM python:3.11-slim
+
+ENV PIP_NO_CACHE_DIR=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    tesseract-ocr tesseract-ocr-rus tesseract-ocr-eng tesseract-ocr-script-cyrillic \
+    poppler-utils qpdf ghostscript \
+    libreoffice \
+    libmagic1 curl ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+
+RUN mkdir -p /opt/docling-models && python - <<'PY'
+from docling.utils.model_downloader import download_models
+import os
+models_dir = "/opt/docling-models"
+os.makedirs(models_dir, exist_ok=True)
+download_models(target_dir=models_dir)
+print("Prefetched Docling models to:", models_dir)
+PY
+
+COPY app ./app
+EXPOSE 8088
+CMD ["bash", "-lc", "uvicorn app.main:app --host ${UVICORN_HOST:-0.0.0.0} --port ${UVICORN_PORT:-8088} --workers 1"]

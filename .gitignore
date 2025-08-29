@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+.venv*/
+.env
+.env*/
+*.env
+
+# Byte-compiled / optimized / DLL files
+*.so
+*.dylib
+
+# Unit test / coverage reports
+.pytest_cache/
+.coverage
+.coverage.*
+hypothesis/
+htmlcov/
+
+# VS Code
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+build/
+dist/
+.eggs/
+*.egg-info/
+
+# Logs
+logs/
+*.log
+
+# Local data
+/data/
+!/data/.gitkeep
+
+# Docker
+*.pid
+
+# Poetry/Pipenv
+poetry.lock
+Pipfile.lock

@@ -1,0 +1,40 @@
+# Ignore everything by default except necessary context
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/*.pyd
+*.py[cod]
+*$py.class
+
+# Git
+.git
+.gitignore
+
+# Python envs
+.venv
+.venv*/
+.env
+.env*/
+*.env
+
+# IDE/editor
+.vscode
+.idea
+
+# Tests and reports
+.pytest_cache
+.coverage
+htmlcov
+
+# Local data (mounted as volume when needed)
+data/
+
+# Build output
+build/
+dist/
+.eggs/
+*.egg-info/
+
+# OS
+.DS_Store
+Thumbs.db

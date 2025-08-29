@@ -1,0 +1,24 @@
+version: "3.9"
+services:
+  docling:
+    build: .
+    image: docling-fastapi:latest
+    container_name: docling
+    ports:
+      - "8088:8088"
+    environment:
+      - UVICORN_HOST=0.0.0.0
+      - UVICORN_PORT=8088
+      - OMP_NUM_THREADS=4
+      - DOCLING_ARTIFACTS_PATH=/opt/docling-models
+      - DOCLING_TABLE_MODE=ACCURATE
+      - DOCLING_FORCE_OCR=true
+      - DOCLING_LANGS=rus,eng
+      - MAX_FILE_SIZE_MB=80
+    volumes:
+      - docling-models:/opt/docling-models
+      - ./data:/data
+    restart: unless-stopped
+
+volumes:
+  docling-models:
