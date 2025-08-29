@@ -1,20 +1,21 @@
-# Docling FastAPI Microservice
+# Docling FastAPI микросервис
 
-A Dockerized FastAPI microservice that converts office documents, PDFs, and images into Markdown and/or JSON using Docling. It supports:
+Docker-микросервис на FastAPI для конвертации офисных документов, PDF и изображений
+в Markdown и/или JSON с помощью Docling. Поддерживает:
 
-- Autodetection of input type
-- Legacy conversion of `.doc/.xls/.ppt` via LibreOffice to OOXML
-- OCR strategies for PDF/images using Tesseract with configurable PSM sweep
-- Table structure extraction (ACCURATE mode)
+- Автоопределение типа входного файла
+- Конвертацию устаревших форматов `.doc/.xls/.ppt` через LibreOffice в OOXML
+- Стратегии OCR для PDF/изображений на Tesseract с перебором PSM
+- Извлечение структуры таблиц (режим ACCURATE)
 
-## Features
+## Возможности
 
-- Single universal endpoint: `POST /convert`
-- Health check: `GET /health`
-- Configurable via environment variables
-- Pre-fetches Docling models at build time for faster cold starts
+- Один универсальный эндпоинт: `POST /convert`
+- Проверка состояния: `GET /health`
+- Гибкая настройка через переменные окружения
+- Забор моделей Docling на этапе сборки образа для ускорения старта
 
-## Project Structure
+## Структура проекта
 
 ```
 .
@@ -25,21 +26,21 @@ A Dockerized FastAPI microservice that converts office documents, PDFs, and imag
    └─ main.py
 ```
 
-## Requirements
+## Требования
 
-- Docker and Docker Compose (recommended), or Python 3.11+ with system packages:
-  - tesseract-ocr (+ language packs), poppler-utils, qpdf, ghostscript, libreoffice, libmagic1
+- Docker и Docker Compose (рекомендуется), либо Python 3.11+ и системные пакеты:
+  - tesseract-ocr (+ языковые пакеты), poppler-utils, qpdf, ghostscript, libreoffice, libmagic1
 
-## Quick Start (Docker Compose)
+## Быстрый старт (Docker Compose)
 
 ```bash
-# Build and run
+# Сборка и запуск
 docker compose up --build -d
 
-# Check health
+# Проверка доступности
 curl http://localhost:8088/health
 
-# Convert a file (example)
+# Конвертация файла (пример)
 curl -X POST \
   -F "file=@/path/to/input.pdf" \
   -F "out=both" \
@@ -48,40 +49,40 @@ curl -X POST \
   http://localhost:8088/convert | jq '.meta, .best_strategy, (.content_markdown | tostring) | .[0:2000]'
 ```
 
-## Environment Variables
+## Переменные окружения
 
-- `UVICORN_HOST` (default: `0.0.0.0`)
-- `UVICORN_PORT` (default: `8088`)
-- `OMP_NUM_THREADS` (default: `4`)
-- `DOCLING_ARTIFACTS_PATH` (default: `/opt/docling-models`)
-- `DOCLING_TABLE_MODE` (default: `ACCURATE`)
-- `DOCLING_FORCE_OCR` (default: `true`)
-- `DOCLING_LANGS` (default: `rus,eng`)
-- `MAX_FILE_SIZE_MB` (default: `80`)
+- `UVICORN_HOST` (по умолчанию: `0.0.0.0`)
+- `UVICORN_PORT` (по умолчанию: `8088`)
+- `OMP_NUM_THREADS` (по умолчанию: `4`)
+- `DOCLING_ARTIFACTS_PATH` (по умолчанию: `/opt/docling-models`)
+- `DOCLING_TABLE_MODE` (по умолчанию: `ACCURATE`)
+- `DOCLING_FORCE_OCR` (по умолчанию: `true`)
+- `DOCLING_LANGS` (по умолчанию: `rus,eng`)
+- `MAX_FILE_SIZE_MB` (по умолчанию: `80`)
 
-Set these in `docker-compose.yml` as shown, or pass them to the container runtime.
+Можно задать в `docker-compose.yml` либо передать в рантайм контейнера.
 
 ## API
 
 ### GET /health
 
-- Returns `{ "ok": true }`.
+- Возвращает `{ "ok": true }`.
 
 ### POST /convert
 
-Form fields:
-- `file` (required): file upload.
-- `out` (optional): `markdown` | `json` | `both` (default: `both`).
-- `langs` (optional): e.g., `rus,eng` (defaults to env `DOCLING_LANGS`).
-- `psm_list` (optional): Tesseract PSM candidates, e.g. `6,4,11`.
-- `max_pages` (optional): integer page limit for conversion.
+Поля формы:
+- `file` (обязательно): загружаемый файл.
+- `out` (необязательно): `markdown` | `json` | `both` (по умолчанию: `both`).
+- `langs` (необязательно): напр. `rus,eng` (по умолчанию берётся из `DOCLING_LANGS`).
+- `psm_list` (необязательно): кандидаты PSM, напр. `6,4,11`.
+- `max_pages` (необязательно): ограничение страниц для обработки.
 
-Behavior:
-- `.doc/.xls/.ppt` → LibreOffice to OOXML → Docling (no OCR)
-- PDF/images → try no-OCR; then force-OCR with provided PSMs; choose best by heuristic
-- OOXML/HTML/MD/CSV → Docling directly (no OCR)
+Поведение:
+- `.doc/.xls/.ppt` → LibreOffice → OOXML → Docling (без OCR)
+- PDF/изображения → сначала без OCR; затем принудительный OCR с PSM; выбор лучшего по эвристике
+- OOXML/HTML/MD/CSV → напрямую в Docling (без OCR)
 
-Response (example):
+Пример ответа:
 ```json
 {
   "best_strategy": "psm:6",
@@ -102,7 +103,7 @@ Response (example):
 }
 ```
 
-## Build Without Compose (Docker)
+## Сборка без Compose (Docker)
 
 ```bash
 docker build -t docling-fastapi:latest .
@@ -118,7 +119,7 @@ docker run --rm -p 8088:8088 \
   --name docling docling-fastapi:latest
 ```
 
-## Local Development (Python)
+## Локальная разработка (Python)
 
 ```bash
 python3 -m venv .venv
@@ -127,20 +128,22 @@ pip install -r requirements.txt
 uvicorn app.main:app --host 0.0.0.0 --port 8088 --reload
 ```
 
-Note: You must install system packages mentioned in Requirements when running outside Docker.
+Примечание: при запуске вне Docker необходимо установить системные пакеты из
+раздела «Требования».
 
-## Notes on OCR and PSM
+## Замечания по OCR и PSM
 
-- PSM values (e.g., 6, 4, 11) control page segmentation in Tesseract.
-- The service computes a simple heuristic based on output length and Cyrillic ratio
-  to choose the best strategy.
+- PSM (например, 6, 4, 11) управляет сегментацией страниц в Tesseract.
+- Сервис использует простую эвристику (длина текста и доля кириллицы) для выбора
+  лучшей стратегии.
 
-## Troubleshooting
+## Диагностика проблем
 
-- Missing docling models: ensure `/opt/docling-models` volume and that models were pre-fetched during image build.
-- Poor OCR quality: try different `psm_list` or add appropriate language packs.
-- Large PDFs: use `max_pages` to limit processing or increase container resources.
+- Нет моделей Docling: проверьте том `/opt/docling-models` и предзагрузку моделей
+  во время сборки образа.
+- Низкое качество OCR: попробуйте другой `psm_list` или установите нужные языковые пакеты.
+- Большие PDF: используйте `max_pages` или выделите больше ресурсов контейнеру.
 
-## License
+## Лицензия
 
-This project contains third-party dependencies under their respective licenses.
+Проект использует сторонние зависимости, распространяемые по их лицензиям.

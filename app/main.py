@@ -1,32 +1,32 @@
-"""Docling FastAPI microservice.
+"""Сервис FastAPI на базе Docling.
 
-This service converts various office documents, PDFs, and images into
-structured representations (Markdown and/or JSON) using Docling.
-It includes format autodetection, optional legacy conversion via LibreOffice
-(.doc/.xls/.ppt to OOXML), and an OCR strategy sweep for image-like inputs
-using Tesseract.
+Сервис конвертирует офисные документы, PDF и изображения в структурированный
+вид (Markdown и/или JSON) с использованием Docling. Поддерживается
+автоопределение формата, при необходимости — конвертация устаревших форматов
+через LibreOffice (.doc/.xls/.ppt → OOXML) и подбор стратегии OCR (Tesseract)
+для «изобразительных» входов.
 
-Environment variables:
-    UVICORN_HOST (str): Host for uvicorn. Default: 0.0.0.0
-    UVICORN_PORT (int): Port for uvicorn. Default: 8088
-    OMP_NUM_THREADS (int): OpenMP threads for OCR/CPU-bound ops. Default: 4
-    DOCLING_ARTIFACTS_PATH (str): Directory for Docling models.
-    DOCLING_TABLE_MODE (str): Table extraction mode, e.g., "ACCURATE".
-    DOCLING_FORCE_OCR (bool): Whether to force OCR (baseline default).
-        Default: true
-    DOCLING_LANGS (str): Comma-separated OCR languages, e.g., "rus,eng".
-    MAX_FILE_SIZE_MB (int): Max upload size in MB. Default: 80
+Переменные окружения:
+    UVICORN_HOST (str): Хост для uvicorn. По умолчанию: 0.0.0.0
+    UVICORN_PORT (int): Порт для uvicorn. По умолчанию: 8088
+    OMP_NUM_THREADS (int): Кол-во потоков OpenMP. По умолчанию: 4
+    DOCLING_ARTIFACTS_PATH (str): Папка с моделями Docling.
+    DOCLING_TABLE_MODE (str): Режим таблиц, напр. "ACCURATE".
+    DOCLING_FORCE_OCR (bool): Принудительный OCR (базовое значение).
+        По умолчанию: true
+    DOCLING_LANGS (str): Языки OCR через запятую, напр. "rus,eng".
+    MAX_FILE_SIZE_MB (int): Максимальный размер файла в МБ. По умолчанию: 80
 
-Main endpoints:
+Основные эндпоинты:
     GET /health
-        Liveness check.
+        Простой чек доступности.
 
     POST /convert
-        Universal endpoint: autodetect strategy per file-type.
-        - Legacy .doc/.xls/.ppt → LibreOffice → OOXML → Docling (no OCR)
-        - PDF/images → try no-OCR then force-OCR with PSM candidates; pick best
-        - OOXML/HTML/MD/CSV → Docling (no OCR)
-
+        Универсальный эндпоинт со стратегией по типу файла:
+        - .doc/.xls/.ppt → LibreOffice → OOXML → Docling (без OCR)
+                - PDF/изображения → без OCR, затем принудительный OCR c PSM;
+                    выбор лучшего
+        - OOXML/HTML/MD/CSV → Docling (без OCR)
 """
 
 from __future__ import annotations
@@ -63,23 +63,23 @@ DEFAULT_LANGS = [
 MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "80"))
 
 
-# Helper to construct a DocumentConverter for PDF/image scenarios
+# Вспомогательная функция для сборки DocumentConverter под PDF/изображения
 def build_pdf_converter(
     force_ocr: bool,
     langs: list[str],
     table_mode: str,
     psm: Optional[int] = None,
 ) -> DocumentConverter:
-    """Build a DocumentConverter tailored to PDF/image inputs.
+    """Собирает DocumentConverter для PDF/изображений.
 
     Args:
-        force_ocr: Whether to force full-page OCR.
-        langs: OCR languages list (e.g., ["rus", "eng"]).
-        table_mode: Table structure mode (e.g., "ACCURATE").
-        psm: Optional page segmentation mode for Tesseract.
+        force_ocr: Принудительный полностраничный OCR.
+        langs: Языки OCR (например, ["rus", "eng"]).
+        table_mode: Режим извлечения таблиц (например, "ACCURATE").
+        psm: Необязательный PSM (режим сегментации страниц) для Tesseract.
 
     Returns:
-        DocumentConverter configured for PDF/image processing.
+        DocumentConverter, настроенный для обработки PDF/изображений.
     """
     pipe = PdfPipelineOptions(artifacts_path=DOCLING_ARTIFACTS_PATH)
 
@@ -123,12 +123,12 @@ def build_pdf_converter(
 
 
 class ConvertResponse(BaseModel):
-    """Standard conversion response model.
+    """Стандартная модель ответа конвертации.
 
     Attributes:
-        content_markdown: Output Markdown string (if requested).
-        content_json: Output JSON structure (if requested).
-        meta: Metadata about the request/processing.
+        content_markdown: Строка Markdown (если запрошено).
+        content_json: JSON-структура (если запрошено).
+        meta: Метаданные о запросе/обработке.
     """
     content_markdown: Optional[str] = None
     content_json: Optional[dict] = None
@@ -137,14 +137,14 @@ class ConvertResponse(BaseModel):
 
 @app.get("/health")
 def health():
-    """Health check endpoint.
+    """Эндпоинт проверки доступности.
 
     Returns:
         dict: {"ok": True}
     """
     return {"ok": True}
 
-# Universal endpoint: autodetect + legacy convert + OCR PSM sweep
+# Универсальный эндпоинт: автоопределение + конвертация legacy + OCR PSM sweep
 
 
 @app.post("/convert", response_model=ConvertResponse)
