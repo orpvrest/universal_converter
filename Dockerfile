@@ -5,7 +5,7 @@ ENV PIP_NO_CACHE_DIR=1 \
     PYTHONUNBUFFERED=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    tesseract-ocr tesseract-ocr-rus tesseract-ocr-eng tesseract-ocr-script-cyrillic \
+    tesseract-ocr tesseract-ocr-rus tesseract-ocr-eng tesseract-ocr-osd \
     poppler-utils qpdf ghostscript \
     libreoffice \
     libmagic1 curl ca-certificates && \
