@@ -17,33 +17,34 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 RUN mkdir -p /opt/docling-models && python - <<'PY'
 import os
+from pathlib import Path
 from docling.utils.model_downloader import download_models
 
-models_dir = "/opt/docling-models"
-os.makedirs(models_dir, exist_ok=True)
+models_dir = Path("/opt/docling-models")
+models_dir.mkdir(parents=True, exist_ok=True)
 
-# Совместимость с разными версиями Docling: именование аргумента могло меняться.
+# Совместимость с разными версиями Docling: пробуем разные варианты параметров
 downloaded = False
-for kwargs in (
-    {"target_dir": models_dir},
-    {"target_path": models_dir},
-    {},  # попробуем позиционный вызов
-):
+for attempt in [
+    lambda: download_models(),  # без параметров (default path)
+    lambda: download_models(models_dir),  # Path object
+    lambda: download_models(str(models_dir)),  # string path
+    lambda: download_models(target_dir=models_dir),  # именованный Path
+    lambda: download_models(target_dir=str(models_dir)),  # именованный string
+]:
     try:
-        if kwargs:
-            download_models(**kwargs)
-        else:
-            download_models(models_dir)
+        attempt()
         downloaded = True
         break
-    except TypeError:
-        pass
+    except (TypeError, AttributeError) as e:
+        print(f"Попытка не удалась: {e}")
+        continue
 
 if not downloaded:
-    # Последняя попытка: простой позиционный вызов (на случай других сигнатур)
-    download_models(models_dir)
-
-print("Prefetched Docling models to:", models_dir)
+    print("Все попытки загрузки моделей провалились")
+    exit(1)
+else:
+    print("Prefetched Docling models to:", models_dir)
 PY
 
 COPY app ./app
