@@ -121,8 +121,8 @@ def build_pdf_converter(
 
     pipe = PdfPipelineOptions(artifacts_path=DOCLING_ARTIFACTS_PATH)
 
-    # When not forcing OCR, let Docling decide; still pass langs but don't
-    # force full-page
+    # When forcing OCR, enable full-page OCR; otherwise disable OCR entirely
+    # for a true baseline without OCR.
     if force_ocr:
         pipe.do_ocr = True
         ocr_opts = TesseractCliOcrOptions(
@@ -131,12 +131,7 @@ def build_pdf_converter(
         )
         pipe.ocr_options = ocr_opts
     else:
-        pipe.do_ocr = True
-        ocr_opts = TesseractCliOcrOptions(
-            lang=langs,
-            force_full_page_ocr=False,
-        )
-        pipe.ocr_options = ocr_opts
+        pipe.do_ocr = False
 
     if table_mode == "ACCURATE":
         pipe.do_table_structure = True
@@ -242,6 +237,38 @@ async def convert_universal(
                 ".bmp",
                 ".webp",
             )
+        )
+
+    def is_direct_supported(name: str) -> bool:
+        return any(
+            name.endswith(ext)
+            for ext in (
+                ".docx",
+                ".pptx",
+                ".xlsx",
+                ".html",
+                ".htm",
+                ".md",
+                ".csv",
+                ".adoc",
+                ".asciidoc",
+            )
+        )
+
+    # Отсечь неподдерживаемые форматы (например .txt)
+    if not (
+        is_legacy(lower)
+        or is_pdf(lower)
+        or is_image(lower)
+        or is_direct_supported(lower)
+    ):
+        raise HTTPException(
+            415,
+            detail=(
+                "Unsupported file type. Allowed: legacy (.doc/.xls/.ppt), "
+                ".pdf, images, or direct formats "
+                "(.docx/.pptx/.xlsx/.html/.md/.csv/.adoc)"
+            ),
         )
 
     # 1) legacy → LibreOffice convert → OOXML bytes
@@ -421,39 +448,217 @@ async def convert_universal(
                 }
             })
 
-        # 3) OOXML/HTML/MD/CSV → прямо через Docling
-        conv = build_pdf_converter(
-            force_ocr=False,
-            langs=_langs,
-            table_mode=DEFAULT_TABLE_MODE,
-        )
-        res = conv.convert(
-            DocumentStream(name=filename, stream=io.BytesIO(in_bytes)),
-            **(
-                {"max_num_pages": max_pages}
-                if isinstance(max_pages, int)
-                else {}
-            ),
-        )
-        dl_doc = res.document
-        md = (
-            dl_doc.export_to_markdown()
-            if out in ("markdown", "both")
-            else None
-        )
-        js = dl_doc.export_to_dict() if out in ("json", "both") else None
-        return JSONResponse(content={
-            "content_markdown": md,
-            "content_json": js,
-            "meta": {
-                "filename": file.filename,
-                "size_bytes": len(raw),
-                "converted": converted,
-                "out": out,
-                "langs": ",".join(_langs),
-                "max_pages": max_pages,
-            }
-        })
+    # 3) OOXML/HTML/MD/CSV → прямо через Docling,
+    #    при ошибке — fallback в PDF
+        try:
+            conv = build_pdf_converter(
+                force_ocr=False,
+                langs=_langs,
+                table_mode=DEFAULT_TABLE_MODE,
+            )
+            res = conv.convert(
+                DocumentStream(name=filename, stream=io.BytesIO(in_bytes)),
+                **(
+                    {"max_num_pages": max_pages}
+                    if isinstance(max_pages, int)
+                    else {}
+                ),
+            )
+            dl_doc = res.document
+            md = (
+                dl_doc.export_to_markdown()
+                if out in ("markdown", "both")
+                else None
+            )
+            js = dl_doc.export_to_dict() if out in ("json", "both") else None
+            return JSONResponse(content={
+                "content_markdown": md,
+                "content_json": js,
+                "meta": {
+                    "filename": file.filename,
+                    "size_bytes": len(raw),
+                    "converted": converted,
+                    "out": out,
+                    "langs": ",".join(_langs),
+                    "max_pages": max_pages,
+                }
+            })
+        except Exception:
+            # Пытаемся через LibreOffice → PDF и затем PDF-пайплайн
+            try:
+                suffix = lower[lower.rfind("."):] if "." in lower else ".bin"
+                fd, tmp_in2 = tempfile.mkstemp(suffix=suffix)
+                os.write(fd, in_bytes)
+                os.close(fd)
+                tmp_dir2 = os.path.dirname(tmp_in2)
+                cmd2 = (
+                    "libreoffice --headless --convert-to pdf --outdir "
+                    f"{shlex.quote(tmp_dir2)} {shlex.quote(tmp_in2)}"
+                )
+                proc2 = subprocess.run(
+                    cmd2,
+                    shell=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=180,
+                )
+                if proc2.returncode != 0:
+                    err2 = proc2.stderr.decode(errors="ignore")[:400]
+                    raise HTTPException(
+                        500, detail=f"Fallback to PDF failed: {err2}"
+                    )
+                tmp_pdf = tmp_in2.rsplit(".", 1)[0] + ".pdf"
+                if not os.path.exists(tmp_pdf):
+                    raise HTTPException(
+                        500, detail="Fallback did not produce PDF"
+                    )
+                with open(tmp_pdf, "rb") as fpdf:
+                    pdf_bytes = fpdf.read()
+                # Удалить временные
+                try:
+                    os.remove(tmp_in2)
+                    os.remove(tmp_pdf)
+                except Exception:
+                    pass
+
+                # Запустить PDF-стратегии (как в п.2)
+                best_doc = None
+                best_tag = None
+                best_score = -1.0
+                conv_no2 = build_pdf_converter(
+                    force_ocr=False,
+                    langs=_langs,
+                    table_mode=DEFAULT_TABLE_MODE,
+                )
+                _conv_kwargs2 = (
+                    {"max_num_pages": max_pages}
+                    if isinstance(max_pages, int)
+                    else {}
+                )
+                res_no2 = conv_no2.convert(
+                    DocumentStream(
+                        name="fallback.pdf",
+                        stream=io.BytesIO(pdf_bytes),
+                    ),
+                    **_conv_kwargs2,
+                )
+                doc_no2 = res_no2.document
+                md_no2 = (
+                    doc_no2.export_to_markdown()
+                    if out in ("markdown", "both")
+                    else ""
+                )
+                text_no2 = md_no2 if isinstance(md_no2, str) else ""
+                total_no2 = len(text_no2)
+                if total_no2 > 0:
+                    cyr_no2 = sum(
+                        1
+                        for ch in text_no2
+                        if ("А" <= ch <= "я") or ch in "Ёё"
+                    )
+                    cyr_ratio_no2 = cyr_no2 / total_no2
+                    score_no2 = total_no2 * (0.6 + 0.4 * cyr_ratio_no2)
+                else:
+                    cyr_ratio_no2, score_no2 = 0.0, 0.0
+                trials.append(
+                    {
+                        "strategy": "no_ocr",
+                        "length": total_no2,
+                        "cyr_ratio": round(cyr_ratio_no2, 3),
+                        "score": round(score_no2, 3),
+                    }
+                )
+                if score_no2 > best_score:
+                    best_score, best_tag, best_doc = (
+                        score_no2,
+                        "no_ocr",
+                        doc_no2,
+                    )
+
+                try:
+                    conv_force2 = build_pdf_converter(
+                        force_ocr=True,
+                        langs=_langs,
+                        table_mode=DEFAULT_TABLE_MODE,
+                    )
+                    res_force2 = conv_force2.convert(
+                        DocumentStream(
+                            name="force-fallback.pdf",
+                            stream=io.BytesIO(pdf_bytes),
+                        ),
+                        **_conv_kwargs2,
+                    )
+                    doc_force2 = res_force2.document
+                    md_force2 = (
+                        doc_force2.export_to_markdown()
+                        if out in ("markdown", "both")
+                        else ""
+                    )
+                    text_force2 = (
+                        md_force2 if isinstance(md_force2, str) else ""
+                    )
+                    total_f2 = len(text_force2)
+                    if total_f2 > 0:
+                        cyr_f2 = sum(
+                            1
+                            for ch in text_force2
+                            if ("А" <= ch <= "я") or ch in "Ёё"
+                        )
+                        cyr_ratio_f2 = cyr_f2 / total_f2
+                        score_f2 = total_f2 * (0.6 + 0.4 * cyr_ratio_f2)
+                    else:
+                        cyr_ratio_f2, score_f2 = 0.0, 0.0
+                    trials.append(
+                        {
+                            "strategy": "force_ocr",
+                            "length": total_f2,
+                            "cyr_ratio": round(cyr_ratio_f2, 3),
+                            "score": round(score_f2, 3),
+                        }
+                    )
+                    if score_f2 > best_score:
+                        best_score, best_tag, best_doc = (
+                            score_f2,
+                            "force_ocr",
+                            doc_force2,
+                        )
+                except Exception as e2:
+                    trials.append({"strategy": "force_ocr", "error": str(e2)})
+
+                if best_doc is None:
+                    raise HTTPException(
+                        500, detail="All strategies failed (fallback)"
+                    )
+                md_fb = (
+                    best_doc.export_to_markdown()
+                    if out in ("markdown", "both")
+                    else None
+                )
+                js_fb = (
+                    best_doc.export_to_dict()
+                    if out in ("json", "both")
+                    else None
+                )
+                return JSONResponse(content={
+                    "best_strategy": best_tag,
+                    "trials": trials,
+                    "content_markdown": md_fb,
+                    "content_json": js_fb,
+                    "meta": {
+                        "filename": file.filename,
+                        "size_bytes": len(raw),
+                        "converted": True,
+                        "out": out,
+                        "langs": ",".join(_langs),
+                        "max_pages": max_pages,
+                    }
+                })
+            except HTTPException:
+                raise
+            except Exception as e3:
+                raise HTTPException(
+                    500, detail=f"Conversion failed: {str(e3)}"
+                )
     finally:
         try:
             if tmp_in and os.path.exists(tmp_in):
