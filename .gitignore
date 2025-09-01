@@ -46,3 +46,5 @@ logs/
 # Poetry/Pipenv
 poetry.lock
 Pipfile.lock
+
+docker-compose.yml
