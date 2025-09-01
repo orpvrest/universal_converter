@@ -35,6 +35,7 @@ import os
 import shlex
 import subprocess
 import tempfile
+import re
 from typing import Literal, Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
@@ -157,6 +158,190 @@ class ConvertResponse(BaseModel):
     content_markdown: Optional[str] = None
     content_json: Optional[dict] = None
     meta: dict
+
+
+class ChunkItem(BaseModel):
+    index: int
+    start: int
+    end: int
+    text: str
+
+
+class ChunkRequest(BaseModel):
+    text: str
+    max_chars: int = 2000
+    overlap: int = 200
+    preserve_markdown: bool = True
+
+
+class ChunkResponse(BaseModel):
+    chunks: list[ChunkItem]
+    meta: dict
+
+
+def _split_code_fences(text: str) -> list[tuple[str, bool]]:
+    """Разбивает текст на блоки: обычные и блоки кода (```...```).
+
+    Returns список (block_text, is_code_block).
+    """
+    parts: list[tuple[str, bool]] = []
+    fence_re = re.compile(r"(^```[\s\S]*?^```\s*$)", re.MULTILINE)
+    last = 0
+    for m in fence_re.finditer(text):
+        if m.start() > last:
+            parts.append((text[last:m.start()], False))
+        parts.append((m.group(1), True))
+        last = m.end()
+    if last < len(text):
+        parts.append((text[last:], False))
+    return parts
+
+
+def _split_paragraphs(block: str) -> list[str]:
+    # Сначала по двойным переводам строк, затем по одиночным
+    paras = re.split(r"\n\s*\n", block.strip())
+    out: list[str] = []
+    for p in paras:
+        lines = [ln for ln in p.splitlines() if ln.strip() != ""]
+        if not lines:
+            continue
+        out.append("\n".join(lines))
+    return out
+
+
+def _split_sentences(text: str) -> list[str]:
+    # Простая нарезка по предложениям (латиница+кириллица)
+    sents = re.split(r"(?<=[\.!?…])\s+(?=[A-ZА-ЯЁ])", text)
+    return [s for s in sents if s]
+
+
+def hybrid_chunk(
+    text: str,
+    max_chars: int,
+    overlap: int,
+    preserve_md: bool,
+) -> list[ChunkItem]:
+    """Гибридный чанкер: сохраняет MD-заголовки,
+    учитывает параграфы/предложения, ограничивает размер чанка и
+    добавляет перекрытие overlap.
+    """
+    text = text or ""
+    blocks = _split_code_fences(text)
+    chunks: list[ChunkItem] = []
+    buf = ""
+    pos = 0
+
+    def flush(with_overlap: bool = True):
+        nonlocal buf, pos
+        if buf.strip() == "":
+            return
+        start = pos
+        end = pos + len(buf)
+        idx = len(chunks)
+        chunks.append(ChunkItem(index=idx, start=start, end=end, text=buf))
+        if with_overlap and overlap > 0 and len(buf) > overlap:
+            buf = buf[-overlap:]
+            pos = end - overlap
+        else:
+            buf = ""
+            pos = end
+
+    for block, is_code in blocks:
+        if is_code:
+            if buf and len(buf) + len(block) + 2 > max_chars:
+                flush()
+            if buf:
+                buf = f"{buf}\n\n{block}" if buf else block
+            else:
+                buf = block
+            flush()
+            continue
+
+        paras = _split_paragraphs(block)
+        for p in paras:
+            is_heading = (
+                bool(re.match(r"^\s*#{1,6}\s+", p)) if preserve_md else False
+            )
+            if is_heading:
+                # Заголовок как префикс следующего чанка
+                if buf:
+                    flush()
+                if len(p) >= max_chars:
+                    # Очень длинный заголовок — отдадим отдельным чанком
+                    buf = p[:max_chars]
+                    flush()
+                    buf = p[max_chars:]
+                    flush()
+                else:
+                    buf = p
+                continue
+
+            # Если параграф помещается
+            if len(p) + (2 if buf else 0) <= max_chars - len(buf):
+                buf = f"{buf}\n\n{p}" if buf else p
+                continue
+
+            # Иначе режем параграф на предложения
+            sents = _split_sentences(p)
+            cur = ""
+            for s in sents:
+                add = s if cur == "" else (cur + " " + s)
+                if len(add) <= max_chars - len(buf) - (2 if buf else 0):
+                    cur = add
+                else:
+                    if cur:
+                        # Финализируем текущую часть параграфа
+                        buf = f"{buf}\n\n{cur}" if buf else cur
+                        flush()
+                        cur = ""
+                    # Если предложение само длинное — режем по символам
+                    while len(s) > max_chars:
+                        part = s[:max_chars]
+                        s = s[max_chars:]
+                        buf = part
+                        flush()
+                    cur = s
+            if cur:
+                if len(cur) + (2 if buf else 0) > max_chars - len(buf):
+                    flush()
+                buf = f"{buf}\n\n{cur}" if buf else cur
+                flush()
+
+    if buf:
+        flush(with_overlap=False)
+
+    return chunks
+
+
+
+
+@app.post("/chunk", response_model=ChunkResponse)
+async def chunk_text(req: ChunkRequest) -> ChunkResponse:
+    """Чанкинг текста гибридным алгоритмом.
+
+    Вход: JSON с полями text, max_chars, overlap, preserve_markdown.
+    Выход: список чанков с индексами и позициями в исходной строке.
+    """
+    if req.max_chars <= 0:
+        raise HTTPException(400, detail="max_chars must be > 0")
+    if req.overlap < 0:
+        raise HTTPException(400, detail="overlap must be >= 0")
+
+    chunks = hybrid_chunk(
+        text=req.text,
+        max_chars=req.max_chars,
+        overlap=req.overlap,
+        preserve_md=req.preserve_markdown,
+    )
+    return ChunkResponse(
+        chunks=chunks,
+        meta={
+            "strategy": "hybrid",
+            "count": len(chunks),
+            "max_chars": req.max_chars,
+            "overlap": req.overlap,
+        },
+    )
 
 
 @app.get("/health")
