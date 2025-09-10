@@ -116,10 +116,9 @@ def ensure_models() -> None:
         root = Path(DOCLING_ARTIFACTS_PATH)
         root.mkdir(parents=True, exist_ok=True)
 
-    # Признак наличия скачанных моделей: хотя бы один
-    # model.safetensors в подпапках
-        has_any_model = any(root.rglob("model.safetensors"))
-        if not has_any_model:
+        # Убедимся, что модели есть (или скачаем)
+        found_any = list(root.rglob("model.safetensors"))
+        if not found_any:
             download_models(
                 output_dir=root,
                 progress=False,
@@ -129,6 +128,26 @@ def ensure_models() -> None:
                 with_picture_classifier=True,
                 with_easyocr=True,
             )
+            found_any = list(root.rglob("model.safetensors"))
+
+    # Docling (LayoutPredictor) может ожидать safetensors
+    # по корневому пути.
+        # Если в корне нет файла, но он есть в подпапках — положим симлинк.
+        root_st = root / "model.safetensors"
+        if not root_st.exists() and found_any:
+            target = found_any[0]
+            try:
+                # Симлинк предпочтительнее, но если FS не поддерживает —
+                # копируем
+                root_st.symlink_to(target)
+            except Exception:
+                try:
+                    import shutil as _sh
+
+                    _sh.copyfile(target, root_st)
+                except Exception:
+                    pass
+
         _MODELS_READY = True
     except Exception:
         # Не блокируем: Docling попробет скачать сам в дефолтный кэш
