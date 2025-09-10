@@ -142,11 +142,54 @@ def ensure_models() -> None:
                 root_st.symlink_to(target)
             except Exception:
                 try:
-                    import shutil as _sh
-
-                    _sh.copyfile(target, root_st)
+                    shutil.copyfile(target, root_st)
                 except Exception:
                     pass
+
+        # Кроме safetensors, Docling ожидает ряд файлов прямо в корне
+        # каталога артефактов. Если они лежат глубже — положим симлинки/копии.
+        model_dir = None
+        # Ищем рядом с найденным model.safetensors папку с config/preprocessor
+        for st in found_any:
+            cand = st.parent
+            if (cand / "preprocessor_config.json").exists() or (
+                cand / "config.json"
+            ).exists():
+                model_dir = cand
+                break
+        # Если не нашли по соседству, попробуем глобально по дереву артефактов
+        if model_dir is None:
+            try:
+                pc = next(root.rglob("preprocessor_config.json"), None)
+            except Exception:
+                pc = None
+            if pc is not None:
+                model_dir = pc.parent
+        if model_dir is None and found_any:
+            model_dir = found_any[0].parent
+
+        if model_dir is not None:
+            candidates = [
+                "preprocessor_config.json",
+                "config.json",
+                "tokenizer.json",
+                "tokenizer_config.json",
+                "vocab.json",
+                "merges.txt",
+                "special_tokens_map.json",
+                "added_tokens.json",
+            ]
+            for name in candidates:
+                src = model_dir / name
+                dst = root / name
+                if src.exists() and not dst.exists():
+                    try:
+                        dst.symlink_to(src)
+                    except Exception:
+                        try:
+                            shutil.copyfile(src, dst)
+                        except Exception:
+                            pass
 
         _MODELS_READY = True
     except Exception:
