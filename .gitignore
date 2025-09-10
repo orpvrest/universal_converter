@@ -48,3 +48,6 @@ poetry.lock
 Pipfile.lock
 
 docker-compose.yml
+
+# Local runtime config (keep example tracked)
+config/header_filter.json

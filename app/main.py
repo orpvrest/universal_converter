@@ -37,20 +37,17 @@ import subprocess
 import tempfile
 import re
 from typing import Literal, Optional
+import shutil
+from collections import Counter
+import json
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from docling.document_converter import DocumentConverter, PdfFormatOption
-from docling.datamodel.base_models import DocumentStream, InputFormat
-from docling.datamodel.pipeline_options import (
-    PdfPipelineOptions,
-    TesseractCliOcrOptions,
-    TableFormerMode,
-)
+from typing import Any
 
-app = FastAPI(title="Docling microservice", version="3.1.0")
+app = FastAPI(title="Docling microservice", version="3.2.0")
 
 DOCLING_ARTIFACTS_PATH = os.getenv("DOCLING_ARTIFACTS_PATH", None)
 DEFAULT_TABLE_MODE = os.getenv("DOCLING_TABLE_MODE", "ACCURATE").upper()
@@ -61,11 +58,45 @@ DEFAULT_LANGS = [
     if x.strip()
 ]
 MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "80"))
+HEADER_CFG_PATH = os.getenv(
+    "HEADER_FILTER_CONFIG",
+    os.path.abspath(
+        os.path.join(
+            os.path.dirname(__file__),
+            "..",
+            "config",
+            "header_filter.json",
+        )
+    ),
+)
+_HEADER_CFG = None  # lazy-loaded dict
+_MODELS_READY = False  # lazy init flag for docling models
 
 
-# Ленивая проверка/загрузка моделей в DOCLING_ARTIFACTS_PATH при необходимости
-_MODELS_READY = False
+def _load_header_cfg() -> dict:
+    global _HEADER_CFG
+    if _HEADER_CFG is not None:
+        return _HEADER_CFG
+    try:
+        with open(HEADER_CFG_PATH, "r", encoding="utf-8") as f:
+            _HEADER_CFG = json.load(f)
+    except Exception:
+        # Defaults if config missing/broken
+        _HEADER_CFG = {
+            "min_repeats": 3,
+            "min_length": 4,
+            "uppercase_ratio": 0.6,
+            "keywords": [
+                "ООО", "АО", "ПАО", "ФГУП", "ФГБУ", "МИНИСТЕРСТВО",
+                "АДМИНИСТРАЦИЯ", "КОМПАНИЯ", "КОРПОРАЦИЯ", "УНИВЕРСИТЕТ",
+                "ИНСТИТУТ", "ФЕДЕРАЛЬНОЕ", "ГОСУДАРСТВЕННОЕ", "ОБЩЕСТВО",
+                "ОРГАНИЗАЦИЯ", "РОССИЯ", "РОССИЙСКАЯ"
+            ],
+        }
+    return _HEADER_CFG
 
+
+# Ленивая проверка/загрузка моделей
 
 def ensure_models() -> None:
     global _MODELS_READY
@@ -77,7 +108,10 @@ def ensure_models() -> None:
         return
     try:
         from pathlib import Path
-        from docling.utils.model_downloader import download_models
+        import importlib
+
+        mdl = importlib.import_module("docling.utils.model_downloader")
+        download_models = getattr(mdl, "download_models")
 
         root = Path(DOCLING_ARTIFACTS_PATH)
         root.mkdir(parents=True, exist_ok=True)
@@ -97,8 +131,187 @@ def ensure_models() -> None:
             )
         _MODELS_READY = True
     except Exception:
-        # Не блокируем: Docling попробует скачать сам в дефолтный кэш
+        # Не блокируем: Docling попробет скачать сам в дефолтный кэш
         _MODELS_READY = True
+
+
+def _langs_join(langs: list[str]) -> str:
+    """Формирует строку языков для Tesseract/OCRmyPDF: 'rus+eng'."""
+    cleaned = [x for x in (langs or []) if x]
+    return "+".join(cleaned) if cleaned else "rus+eng"
+
+
+def _try_ocrmypdf_preprocess(
+    pdf_bytes: bytes, langs: list[str]
+) -> Optional[bytes]:
+    """Пробует подготовить PDF через OCRmyPDF:
+    - deskew/rotate/clean/remove-background/optimize
+    - --skip-text (не трогать страницы с уже существующим текстовым слоем)
+    Возвращает улучшенный PDF или None, если OCRmyPDF недоступен/ошибся.
+    """
+    if not shutil.which("ocrmypdf"):
+        return None
+    in_fd, in_path = tempfile.mkstemp(suffix=".pdf")
+    out_fd, out_path = tempfile.mkstemp(suffix=".pdf")
+    os.close(in_fd)
+    os.close(out_fd)
+    try:
+        with open(in_path, "wb") as f:
+            f.write(pdf_bytes)
+        cmd = [
+            "ocrmypdf",
+            "--skip-text",
+            "--rotate-pages",
+            "--deskew",
+            "--clean",
+            "--remove-background",
+            "--optimize", "3",
+            "--language", _langs_join(langs),
+            in_path,
+            out_path,
+        ]
+        proc = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=600,
+            check=False,
+        )
+        if proc.returncode != 0:
+            return None
+        # sanity check: выход не пустой и не слишком мал
+        data = open(out_path, "rb").read()
+        return data if len(data) > 1024 else None
+    except Exception:
+        return None
+    finally:
+        try:
+            os.remove(in_path)
+            os.remove(out_path)
+        except Exception:
+            pass
+
+
+def _detect_and_remove_repeating_header(md_text: str) -> tuple[str, int]:
+    """Удаляет повторяющуюся «шапку» (верхние строки абзацев)
+    по всему документу.
+    Эвристики:
+      - Считаем первую строку каждого абзаца (разделитель — пустая строка)
+      - Нормализуем (убираем пунктуацию/цифры, приводим к VERHNIY REGISTR)
+      - Кандидат — встречается >= 3 раз, длина >= 4, и (есть ключевые слова
+        организаций/ведомств ИЛИ доля верхнего регистра > 0.6)
+      - Удаляем такие строки из начала абзацев
+    Возвращает (очищенный_markdown, сколько_раз_удалено).
+    """
+    if not md_text:
+        return md_text, 0
+    blocks = [b for b in re.split(r"\n\s*\n", md_text) if b.strip()]
+    first_lines = []
+    raw_first = []
+    for b in blocks:
+        line = b.splitlines()[0].strip()
+        raw_first.append(line)
+        norm = re.sub(r"[\W_0-9]+", " ", line).strip().upper()
+        first_lines.append(norm)
+    freq = Counter(first_lines)
+    if not freq:
+        return md_text, 0
+    cfg = _load_header_cfg()
+    min_repeats = int(cfg.get("min_repeats", 3))
+    min_length = int(cfg.get("min_length", 4))
+    up_thresh = float(cfg.get("uppercase_ratio", 0.6))
+    org_keywords = tuple(cfg.get("keywords", []))
+    candidates = set()
+    for norm, cnt in freq.items():
+        if cnt < min_repeats or len(norm) < min_length:
+            continue
+        has_kw = any(k in norm for k in org_keywords)
+        up_ratio = (
+            sum(1 for ch in norm if "A" <= ch <= "Z" or "А" <= ch <= "Я") /
+            max(1, len(norm.replace(" ", "")))
+        )
+        if has_kw or up_ratio > up_thresh:
+            candidates.add(norm)
+    if not candidates:
+        return md_text, 0
+    removed = 0
+    new_blocks = []
+    for b in blocks:
+        lines = b.splitlines()
+        if not lines:
+            new_blocks.append(b)
+            continue
+        norm0 = re.sub(r"[\W_0-9]+", " ", lines[0].strip()).strip().upper()
+        if norm0 in candidates:
+            removed += 1
+            lines = lines[1:]  # убрать первую строку как «шапку»
+        new_blocks.append("\n".join(lines).strip())
+    cleaned = "\n\n".join([blk for blk in new_blocks if blk])
+    return cleaned, removed
+
+
+def _remove_first_page_header(md_text: str) -> tuple[str, int]:
+    """Удаляет многосрочную «шапку» только вверху первой страницы/документа.
+
+    Эвристика:
+            - Смотрим первые N строк (по умолчанию 20), берём подряд идущие
+                непустые строки сверху (до пустой строки), не более M строк
+                (по умолчанию 6).
+      - Если верхний блок не начинается с Markdown-заголовка (# ...),
+        и суммарно удовлетворяет одному из условий:
+          • содержит ключевые слова организаций; или
+          • средняя доля верхнего регистра по строкам > порога.
+        — удаляем этот блок.
+    Возвращает (очищенный_markdown, сколько_строк_удалено).
+    """
+    if not md_text:
+        return md_text, 0
+    cfg = _load_header_cfg()
+    fp = cfg.get("first_page", {}) or {}
+    enable = bool(fp.get("enable", True))
+    if not enable:
+        return md_text, 0
+    lines_limit = int(fp.get("lines_limit", 20))
+    max_block_lines = int(fp.get("max_block_lines", 6))
+    up_thresh = float(
+        fp.get("uppercase_ratio", cfg.get("uppercase_ratio", 0.6))
+    )
+    org_keywords = tuple(fp.get("keywords", cfg.get("keywords", [])))
+
+    lines = md_text.splitlines()
+    if not lines:
+        return md_text, 0
+    # Не трогаем явные заголовки документа
+    if lines[0].lstrip().startswith("#"):
+        return md_text, 0
+
+    # Собираем верхний непустой блок
+    top: list[str] = []
+    for i, ln in enumerate(lines[: lines_limit]):
+        if ln.strip() == "":
+            break
+        top.append(ln)
+        if len(top) >= max_block_lines:
+            break
+    if len(top) < 2:
+        return md_text, 0
+
+    # Оценим блок
+    has_kw = any(any(k in ln.upper() for k in org_keywords) for ln in top)
+
+    def up_ratio(s: str) -> float:
+        norm = re.sub(r"[\W_0-9]+", "", s)
+        if not norm:
+            return 0.0
+        ups = sum(1 for ch in norm if "A" <= ch <= "Z" or "А" <= ch <= "Я")
+        return ups / len(norm)
+
+    avg_up = sum(up_ratio(ln) for ln in top) / max(1, len(top))
+    if has_kw or avg_up > up_thresh:
+        removed = len(top)
+        rest = "\n".join(lines[removed:])
+        return rest.lstrip("\n"), removed
+    return md_text, 0
 
 
 # Вспомогательная функция для сборки DocumentConverter под PDF/изображения
@@ -106,7 +319,7 @@ def build_pdf_converter(
     force_ocr: bool,
     langs: list[str],
     table_mode: str,
-) -> DocumentConverter:
+) -> Any:
     """Собирает DocumentConverter для PDF/изображений.
 
     Args:
@@ -119,6 +332,18 @@ def build_pdf_converter(
     """
     # Убедиться, что модели есть (или будут скачаны в указанный артефакт-путь)
     ensure_models()
+
+    # Lazy import docling internals
+    import importlib
+    dc_mod = importlib.import_module("docling.document_converter")
+    dm_base = importlib.import_module("docling.datamodel.base_models")
+    pipe_mod = importlib.import_module("docling.datamodel.pipeline_options")
+    DocumentConverter = getattr(dc_mod, "DocumentConverter")
+    PdfFormatOption = getattr(dc_mod, "PdfFormatOption")
+    InputFormat = getattr(dm_base, "InputFormat")
+    PdfPipelineOptions = getattr(pipe_mod, "PdfPipelineOptions")
+    TesseractCliOcrOptions = getattr(pipe_mod, "TesseractCliOcrOptions")
+    TableFormerMode = getattr(pipe_mod, "TableFormerMode")
 
     pipe = PdfPipelineOptions(artifacts_path=DOCLING_ARTIFACTS_PATH)
 
@@ -313,8 +538,6 @@ def hybrid_chunk(
     return chunks
 
 
-
-
 @app.post("/chunk", response_model=ChunkResponse)
 async def chunk_text(req: ChunkRequest) -> ChunkResponse:
     """Чанкинг текста гибридным алгоритмом.
@@ -398,6 +621,13 @@ async def convert_universal(
         for x in (langs or ",".join(DEFAULT_LANGS)).split(",")
         if x.strip()
     ]
+
+    # Local helper to build a Docling stream lazily
+    def _mk_stream(name: str, data: bytes):
+        import importlib
+        dm_base = importlib.import_module("docling.datamodel.base_models")
+        DocumentStream = getattr(dm_base, "DocumentStream")
+        return DocumentStream(name=name, stream=io.BytesIO(data))
 
     # helpers
     def is_legacy(name: str) -> bool:
@@ -485,6 +715,7 @@ async def convert_universal(
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 timeout=180,
+                check=False,
             )
             if proc.returncode != 0:
                 err = proc.stderr.decode(errors="ignore")[:400]
@@ -502,15 +733,19 @@ async def convert_universal(
             lower = filename.lower()
             converted = True
 
-        trials = []
-
         # 2) PDF/изображение → стратегии: no-force-OCR vs force-OCR
         if is_pdf(lower) or is_image(lower):
             best_doc = None
             best_tag = None   # 'no_ocr' | 'force_ocr'
             best_score = -1.0
 
-            # (a) Без принудительного OCR (Docling сам решит)
+            # (a) Без принудительного OCR; для PDF попробуем OCRmyPDF
+            bytes_for_no = in_bytes
+            if is_pdf(lower):
+                prepped = _try_ocrmypdf_preprocess(in_bytes, _langs)
+                if prepped:
+                    bytes_for_no = prepped
+
             conv_no = build_pdf_converter(
                 force_ocr=False,
                 langs=_langs,
@@ -522,7 +757,7 @@ async def convert_universal(
                 else {}
             )
             res_no = conv_no.convert(
-                DocumentStream(name=filename, stream=io.BytesIO(in_bytes)),
+                _mk_stream(filename, bytes_for_no),
                 **_conv_kwargs,
             )
             doc_no = res_no.document
@@ -531,6 +766,16 @@ async def convert_universal(
                 if out in ("markdown", "both")
                 else ""
             )
+            if isinstance(md_no, str):
+                md_no, header_removed_no = _detect_and_remove_repeating_header(
+                    md_no
+                )
+                md_no, header_removed_first_no = _remove_first_page_header(
+                    md_no
+                )
+            else:
+                header_removed_no = 0
+                header_removed_first_no = 0
             text_no = md_no if isinstance(md_no, str) else ""
             total_no = len(text_no)
             if total_no > 0:
@@ -543,16 +788,19 @@ async def convert_universal(
                 score_no = total_no * (0.6 + 0.4 * cyr_ratio_no)
             else:
                 cyr_ratio_no, score_no = 0.0, 0.0
-            trials.append(
+            trials = [
                 {
                     "strategy": "no_ocr",
                     "length": total_no,
                     "cyr_ratio": round(cyr_ratio_no, 3),
                     "score": round(score_no, 3),
+                    "header_removed": header_removed_no,
+                    "first_header_removed": header_removed_first_no,
                 }
-            )
-            if score_no > best_score:
-                best_score, best_tag, best_doc = score_no, 'no_ocr', doc_no
+            ]
+            best_doc = doc_no
+            best_tag = "no_ocr"
+            best_score = score_no
 
             # (б) Принудительный полностраничный OCR
             try:
@@ -562,10 +810,7 @@ async def convert_universal(
                     table_mode=DEFAULT_TABLE_MODE,
                 )
                 res_force = conv_force.convert(
-                    DocumentStream(
-                        name="force-ocr-" + filename,
-                        stream=io.BytesIO(in_bytes),
-                    ),
+                    _mk_stream("force-ocr-" + filename, in_bytes),
                     **_conv_kwargs,
                 )
                 doc_force = res_force.document
@@ -574,6 +819,16 @@ async def convert_universal(
                     if out in ("markdown", "both")
                     else ""
                 )
+                if isinstance(md_force, str):
+                    md_force, header_removed_force = (
+                        _detect_and_remove_repeating_header(md_force)
+                    )
+                    md_force, header_removed_first_force = (
+                        _remove_first_page_header(md_force)
+                    )
+                else:
+                    header_removed_force = 0
+                    header_removed_first_force = 0
                 text_force = md_force if isinstance(md_force, str) else ""
                 total_f = len(text_force)
                 if total_f > 0:
@@ -592,21 +847,16 @@ async def convert_universal(
                         "length": total_f,
                         "cyr_ratio": round(cyr_ratio_f, 3),
                         "score": round(score_f, 3),
+                        "header_removed": header_removed_force,
+                        "first_header_removed": header_removed_first_force,
                     }
                 )
                 if score_f > best_score:
-                    best_score, best_tag, best_doc = (
-                        score_f,
-                        "force_ocr",
-                        doc_force,
-                    )
+                    best_score = score_f
+                    best_tag = "force_ocr"
+                    best_doc = doc_force
             except Exception as e:
-                trials.append(
-                    {
-                        "strategy": "force_ocr",
-                        "error": str(e),
-                    }
-                )
+                trials.append({"strategy": "force_ocr", "error": str(e)})
 
             if best_doc is None:
                 raise HTTPException(500, detail="All strategies failed")
@@ -615,9 +865,7 @@ async def convert_universal(
                 if out in ("markdown", "both")
                 else None
             )
-            js = (
-                best_doc.export_to_dict() if out in ("json", "both") else None
-            )
+            js = best_doc.export_to_dict() if out in ("json", "both") else None
             return JSONResponse(content={
                 "best_strategy": best_tag,
                 "trials": trials,
@@ -633,8 +881,8 @@ async def convert_universal(
                 }
             })
 
-    # 3) OOXML/HTML/MD/CSV → прямо через Docling,
-    #    при ошибке — fallback в PDF
+        # 3) OOXML/HTML/MD/CSV → прямо через Docling,
+        #    при ошибке — fallback в PDF
         try:
             conv = build_pdf_converter(
                 force_ocr=False,
@@ -642,7 +890,7 @@ async def convert_universal(
                 table_mode=DEFAULT_TABLE_MODE,
             )
             res = conv.convert(
-                DocumentStream(name=filename, stream=io.BytesIO(in_bytes)),
+                _mk_stream(filename, in_bytes),
                 **(
                     {"max_num_pages": max_pages}
                     if isinstance(max_pages, int)
@@ -686,6 +934,7 @@ async def convert_universal(
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     timeout=180,
+                    check=False,
                 )
                 if proc2.returncode != 0:
                     err2 = proc2.stderr.decode(errors="ignore")[:400]
@@ -699,17 +948,13 @@ async def convert_universal(
                     )
                 with open(tmp_pdf, "rb") as fpdf:
                     pdf_bytes = fpdf.read()
-                # Удалить временные
                 try:
                     os.remove(tmp_in2)
                     os.remove(tmp_pdf)
                 except Exception:
                     pass
 
-                # Запустить PDF-стратегии (как в п.2)
-                best_doc = None
-                best_tag = None
-                best_score = -1.0
+                # PDF стратегии для fallback
                 conv_no2 = build_pdf_converter(
                     force_ocr=False,
                     langs=_langs,
@@ -721,10 +966,7 @@ async def convert_universal(
                     else {}
                 )
                 res_no2 = conv_no2.convert(
-                    DocumentStream(
-                        name="fallback.pdf",
-                        stream=io.BytesIO(pdf_bytes),
-                    ),
+                    _mk_stream("fallback.pdf", pdf_bytes),
                     **_conv_kwargs2,
                 )
                 doc_no2 = res_no2.document
@@ -733,6 +975,12 @@ async def convert_universal(
                     if out in ("markdown", "both")
                     else ""
                 )
+                if isinstance(md_no2, str):
+                    md_no2, header_removed_no2 = (
+                        _detect_and_remove_repeating_header(md_no2)
+                    )
+                else:
+                    header_removed_no2 = 0
                 text_no2 = md_no2 if isinstance(md_no2, str) else ""
                 total_no2 = len(text_no2)
                 if total_no2 > 0:
@@ -745,20 +993,19 @@ async def convert_universal(
                     score_no2 = total_no2 * (0.6 + 0.4 * cyr_ratio_no2)
                 else:
                     cyr_ratio_no2, score_no2 = 0.0, 0.0
-                trials.append(
+
+                trials2 = [
                     {
                         "strategy": "no_ocr",
                         "length": total_no2,
                         "cyr_ratio": round(cyr_ratio_no2, 3),
                         "score": round(score_no2, 3),
+                        "header_removed": header_removed_no2,
                     }
-                )
-                if score_no2 > best_score:
-                    best_score, best_tag, best_doc = (
-                        score_no2,
-                        "no_ocr",
-                        doc_no2,
-                    )
+                ]
+                best_doc = doc_no2
+                best_tag = "no_ocr"
+                best_score = score_no2
 
                 try:
                     conv_force2 = build_pdf_converter(
@@ -767,10 +1014,7 @@ async def convert_universal(
                         table_mode=DEFAULT_TABLE_MODE,
                     )
                     res_force2 = conv_force2.convert(
-                        DocumentStream(
-                            name="force-fallback.pdf",
-                            stream=io.BytesIO(pdf_bytes),
-                        ),
+                        _mk_stream("fallback-force.pdf", pdf_bytes),
                         **_conv_kwargs2,
                     )
                     doc_force2 = res_force2.document
@@ -779,6 +1023,12 @@ async def convert_universal(
                         if out in ("markdown", "both")
                         else ""
                     )
+                    if isinstance(md_force2, str):
+                        md_force2, header_removed_force2 = (
+                            _detect_and_remove_repeating_header(md_force2)
+                        )
+                    else:
+                        header_removed_force2 = 0
                     text_force2 = (
                         md_force2 if isinstance(md_force2, str) else ""
                     )
@@ -793,42 +1043,42 @@ async def convert_universal(
                         score_f2 = total_f2 * (0.6 + 0.4 * cyr_ratio_f2)
                     else:
                         cyr_ratio_f2, score_f2 = 0.0, 0.0
-                    trials.append(
+                    trials2.append(
                         {
                             "strategy": "force_ocr",
                             "length": total_f2,
                             "cyr_ratio": round(cyr_ratio_f2, 3),
                             "score": round(score_f2, 3),
+                            "header_removed": header_removed_force2,
                         }
                     )
                     if score_f2 > best_score:
-                        best_score, best_tag, best_doc = (
-                            score_f2,
-                            "force_ocr",
-                            doc_force2,
-                        )
-                except Exception as e2:
-                    trials.append({"strategy": "force_ocr", "error": str(e2)})
+                        best_doc = doc_force2
+                        best_tag = "force_ocr"
+                        best_score = score_f2
+                except Exception as e:
+                    trials2.append({"strategy": "force_ocr", "error": str(e)})
 
                 if best_doc is None:
                     raise HTTPException(
-                        500, detail="All strategies failed (fallback)"
+                        500, detail="Fallback strategies failed"
                     )
-                md_fb = (
+
+                md = (
                     best_doc.export_to_markdown()
                     if out in ("markdown", "both")
                     else None
                 )
-                js_fb = (
+                js = (
                     best_doc.export_to_dict()
                     if out in ("json", "both")
                     else None
                 )
                 return JSONResponse(content={
                     "best_strategy": best_tag,
-                    "trials": trials,
-                    "content_markdown": md_fb,
-                    "content_json": js_fb,
+                    "trials": trials2,
+                    "content_markdown": md,
+                    "content_json": js,
                     "meta": {
                         "filename": file.filename,
                         "size_bytes": len(raw),
@@ -838,12 +1088,8 @@ async def convert_universal(
                         "max_pages": max_pages,
                     }
                 })
-            except HTTPException:
-                raise
-            except Exception as e3:
-                raise HTTPException(
-                    500, detail=f"Conversion failed: {str(e3)}"
-                )
+            except Exception as e:
+                raise HTTPException(500, detail=str(e))
     finally:
         try:
             if tmp_in and os.path.exists(tmp_in):
