@@ -116,7 +116,7 @@ def ensure_models() -> None:
         root = Path(DOCLING_ARTIFACTS_PATH)
         root.mkdir(parents=True, exist_ok=True)
 
-        # Убедимся, что модели есть (или скачаем)
+    # Убедимся, что модели есть (или скачаем)
         found_any = list(root.rglob("model.safetensors"))
         if not found_any:
             download_models(
@@ -190,6 +190,52 @@ def ensure_models() -> None:
                             shutil.copyfile(src, dst)
                         except Exception:
                             pass
+
+        # Финальная проверка: ключевой файл должен быть в корне
+        pc_root = root / "preprocessor_config.json"
+        if not pc_root.exists():
+            # Попробуем найти и проставить ссылку/копию ещё раз
+            try:
+                pc_any = next(root.rglob("preprocessor_config.json"), None)
+            except Exception:
+                pc_any = None
+            if pc_any is not None and pc_any != pc_root:
+                try:
+                    pc_root.symlink_to(pc_any)
+                except Exception:
+                    try:
+                        shutil.copyfile(pc_any, pc_root)
+                    except Exception:
+                        pass
+
+    # Если всё ещё нет — попробуем догрузить модели ещё раз
+    # (на случай пустого тома)
+        if not (root / "preprocessor_config.json").exists():
+            try:
+                download_models(
+                    output_dir=root,
+                    progress=False,
+                    with_layout=True,
+                    with_tableformer=True,
+                    with_code_formula=True,
+                    with_picture_classifier=True,
+                    with_easyocr=True,
+                )
+            except Exception:
+                pass
+
+        # Небольшой лог для контейнера
+        try:
+            print(
+                "ensure_models: artifacts_root=",
+                str(root),
+                " root_has_preprocessor=",
+                (root / "preprocessor_config.json").exists(),
+                " root_has_model=",
+                (root / "model.safetensors").exists(),
+            )
+        except Exception:
+            pass
 
         _MODELS_READY = True
     except Exception:
@@ -637,6 +683,16 @@ def health():
         dict: {"ok": True}
     """
     return {"ok": True}
+
+
+@app.on_event("startup")
+def _init_models_on_startup() -> None:
+    """Pre-initialize Docling models at app start to avoid first-hit 500s."""
+    try:
+        ensure_models()
+    except Exception:
+        # Don't crash the app on startup; convert() will try again if needed
+        pass
 
 # Универсальный эндпоинт: автоопределение + конвертация legacy +
 # OCR без перебора PSM
