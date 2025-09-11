@@ -146,40 +146,70 @@ def ensure_models() -> None:
                 except Exception:
                     pass
 
-        # Кроме safetensors, Docling ожидает ряд файлов прямо в корне
-        # каталога артефактов. Если они лежат глубже — положим симлинки/копии.
-        model_dir = None
-        # Ищем рядом с найденным model.safetensors папку с config/preprocessor
-        for st in found_any:
-            cand = st.parent
-            if (cand / "preprocessor_config.json").exists() or (
-                cand / "config.json"
-            ).exists():
-                model_dir = cand
-                break
-        # Если не нашли по соседству, попробуем глобально по дереву артефактов
-        if model_dir is None:
+        # Найдём корректную папку с layout-моделью (не picture-classifier)
+        # Критерий: в config.json лежит model_type из списка object detection.
+        allowed_types = {
+            "conditional_detr",
+            "dfine",
+            "dab_detr",
+            "deformable_detr",
+            "deta",
+            "detr",
+            "rtdetr",
+            "rtdetrv2",
+            "table-transformer",
+            "yolos",
+        }
+
+        def _is_layout_dir(path: "Path") -> tuple[bool, str | None]:
+            cfg = path / "config.json"
+            if not cfg.exists():
+                return False, None
             try:
-                pc = next(root.rglob("preprocessor_config.json"), None)
+                data = json.loads(cfg.read_text(encoding="utf-8"))
+                mt = (data.get("model_type") or "").lower()
+                return (mt in allowed_types), mt
             except Exception:
-                pc = None
-            if pc is not None:
-                model_dir = pc.parent
+                return False, None
+
+    # Кандидаты: директории рядом с найденными safetensors +
+    # глобальный поиск config
+        candidates_dirs = []
+        for st in found_any:
+            candidates_dirs.append(st.parent)
+        try:
+            for cfg_path in root.rglob("config.json"):
+                candidates_dirs.append(cfg_path.parent)
+        except Exception:
+            pass
+        # Уникализируем сохраняя порядок
+        seen = set()
+        uniq_dirs = []
+        for d in candidates_dirs:
+            if str(d) not in seen:
+                seen.add(str(d))
+                uniq_dirs.append(d)
+
+        model_dir = None
+        model_type = None
+        for cand in uniq_dirs:
+            ok, mt = _is_layout_dir(cand)
+            if ok:
+                model_dir = cand
+                model_type = mt
+                break
         if model_dir is None and found_any:
+            # Fallback: первая папка рядом с safetensors
             model_dir = found_any[0].parent
 
+        # Слинкуем/скопируем только нужные файлы из выбранной layout-модели
         if model_dir is not None:
-            candidates = [
+            needed = (
                 "preprocessor_config.json",
                 "config.json",
-                "tokenizer.json",
-                "tokenizer_config.json",
-                "vocab.json",
-                "merges.txt",
-                "special_tokens_map.json",
-                "added_tokens.json",
-            ]
-            for name in candidates:
+                "model.safetensors",
+            )
+            for name in needed:
                 src = model_dir / name
                 dst = root / name
                 if src.exists() and not dst.exists():
@@ -233,6 +263,8 @@ def ensure_models() -> None:
                 (root / "preprocessor_config.json").exists(),
                 " root_has_model=",
                 (root / "model.safetensors").exists(),
+                " selected_dir=",
+                str(model_dir) if 'model_dir' in locals() else None,
             )
         except Exception:
             pass
