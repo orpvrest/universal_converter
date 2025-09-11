@@ -51,7 +51,7 @@ app = FastAPI(title="Docling microservice", version="3.2.0")
 
 DOCLING_ARTIFACTS_PATH = os.getenv("DOCLING_ARTIFACTS_PATH", None)
 DEFAULT_TABLE_MODE = os.getenv("DOCLING_TABLE_MODE", "ACCURATE").upper()
-DEFAULT_FORCE_OCR = os.getenv("DOCLING_FORCE_OCR", "true").lower() == "true"
+DEFAULT_FORCE_OCR = os.getenv("DOCLING_FORCE_OCR", "false").lower() == "true"
 DEFAULT_LANGS = [
     x.strip()
     for x in os.getenv("DOCLING_LANGS", "rus,eng").split(",")
@@ -422,8 +422,8 @@ def _remove_first_page_header(md_text: str) -> tuple[str, int]:
     if not lines:
         return md_text, 0
     # Не трогаем явные заголовки документа
-    if lines[0].lstrip().startswith("#"):
-        return md_text, 0
+    # if lines[0].lstrip().startswith("#"):
+    #    return md_text, 0
 
     # Собираем верхний непустой блок
     top: list[str] = []
