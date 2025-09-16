@@ -1,3 +1,4 @@
+# Интеграционные проверки OCR и fallback-стратегий Docling сервиса.
 import importlib
 import io
 import shutil
@@ -91,8 +92,9 @@ def test_convert_real_russian_pdf():
             timeout=60.0,
             follow_redirects=True,
             headers={
-                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) ",
+                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0",
                 "Referer": "https://mai.ru/",
+                "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.6,en;q=0.4",
             },
         )
         resp.raise_for_status()

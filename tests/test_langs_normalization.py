@@ -1,3 +1,4 @@
+# Тесты для проверки нормализации списков языков и сборки строки для OCR.
 from app.main import _langs_join, _normalize_easyocr_langs, _normalize_langs
 
 

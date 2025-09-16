@@ -39,6 +39,7 @@ logs/
 # Local data
 /data/
 !/data/.gitkeep
+pdf_example/
 
 # Docker
 *.pid
