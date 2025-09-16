@@ -18,6 +18,9 @@ testpaths = ["tests"]
 python_files = "test_*.py"
 python_functions = "test_*"
 addopts = "--cov=app --cov-report=html --cov-report=term-missing"
+markers = [
+    "timeout: mark tests that specify a runtime limit",
+]
 
 [tool.coverage.run]
 source = ["app"]

@@ -8,7 +8,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tesseract-ocr tesseract-ocr-rus tesseract-ocr-eng tesseract-ocr-osd \
     poppler-utils qpdf ghostscript \
     libreoffice \
-    libmagic1 curl ca-certificates && \
+    libmagic1 curl ca-certificates \
+    libgl1 libglib2.0-0 libsm6 libxext6 libxrender1 libgomp1 && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
