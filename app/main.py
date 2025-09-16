@@ -31,21 +31,19 @@
 from __future__ import annotations
 
 import io
+import json
 import os
+import re
 import shlex
+import shutil
 import subprocess
 import tempfile
-import re
-from typing import Literal, Optional
-import shutil
 from collections import Counter
-import json
+from typing import Any, Literal, Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-
-from typing import Any
 
 app = FastAPI(title="Docling microservice", version="3.2.0")
 
@@ -87,16 +85,30 @@ def _load_header_cfg() -> dict:
             "min_length": 4,
             "uppercase_ratio": 0.6,
             "keywords": [
-                "ООО", "АО", "ПАО", "ФГУП", "ФГБУ", "МИНИСТЕРСТВО",
-                "АДМИНИСТРАЦИЯ", "КОМПАНИЯ", "КОРПОРАЦИЯ", "УНИВЕРСИТЕТ",
-                "ИНСТИТУТ", "ФЕДЕРАЛЬНОЕ", "ГОСУДАРСТВЕННОЕ", "ОБЩЕСТВО",
-                "ОРГАНИЗАЦИЯ", "РОССИЯ", "РОССИЙСКАЯ"
+                "ООО",
+                "АО",
+                "ПАО",
+                "ФГУП",
+                "ФГБУ",
+                "МИНИСТЕРСТВО",
+                "АДМИНИСТРАЦИЯ",
+                "КОМПАНИЯ",
+                "КОРПОРАЦИЯ",
+                "УНИВЕРСИТЕТ",
+                "ИНСТИТУТ",
+                "ФЕДЕРАЛЬНОЕ",
+                "ГОСУДАРСТВЕННОЕ",
+                "ОБЩЕСТВО",
+                "ОРГАНИЗАЦИЯ",
+                "РОССИЯ",
+                "РОССИЙСКАЯ",
             ],
         }
     return _HEADER_CFG
 
 
 # Ленивая проверка/загрузка моделей
+
 
 def ensure_models() -> None:
     global _MODELS_READY
@@ -107,8 +119,8 @@ def ensure_models() -> None:
         _MODELS_READY = True
         return
     try:
-        from pathlib import Path
         import importlib
+        from pathlib import Path
 
         mdl = importlib.import_module("docling.utils.model_downloader")
         download_models = getattr(mdl, "download_models")
@@ -116,7 +128,7 @@ def ensure_models() -> None:
         root = Path(DOCLING_ARTIFACTS_PATH)
         root.mkdir(parents=True, exist_ok=True)
 
-    # Убедимся, что модели есть (или скачаем)
+        # Убедимся, что модели есть (или скачаем)
         found_any = list(root.rglob("model.safetensors"))
         if not found_any:
             download_models(
@@ -130,8 +142,8 @@ def ensure_models() -> None:
             )
             found_any = list(root.rglob("model.safetensors"))
 
-    # Docling (LayoutPredictor) может ожидать safetensors
-    # по корневому пути.
+        # Docling (LayoutPredictor) может ожидать safetensors
+        # по корневому пути.
         # Если в корне нет файла, но он есть в подпапках — положим симлинк.
         root_st = root / "model.safetensors"
         if not root_st.exists() and found_any:
@@ -172,8 +184,8 @@ def ensure_models() -> None:
             except Exception:
                 return False, None
 
-    # Кандидаты: директории рядом с найденными safetensors +
-    # глобальный поиск config
+        # Кандидаты: директории рядом с найденными safetensors +
+        # глобальный поиск config
         candidates_dirs = []
         for st in found_any:
             candidates_dirs.append(st.parent)
@@ -238,8 +250,8 @@ def ensure_models() -> None:
                     except Exception:
                         pass
 
-    # Если всё ещё нет — попробуем догрузить модели ещё раз
-    # (на случай пустого тома)
+        # Если всё ещё нет — попробуем догрузить модели ещё раз
+        # (на случай пустого тома)
         if not (root / "preprocessor_config.json").exists():
             try:
                 download_models(
@@ -264,7 +276,7 @@ def ensure_models() -> None:
                 " root_has_model=",
                 (root / "model.safetensors").exists(),
                 " selected_dir=",
-                str(model_dir) if 'model_dir' in locals() else None,
+                str(model_dir) if "model_dir" in locals() else None,
             )
         except Exception:
             pass
@@ -279,6 +291,64 @@ def _langs_join(langs: list[str]) -> str:
     """Формирует строку языков для Tesseract/OCRmyPDF: 'rus+eng'."""
     cleaned = [x for x in (langs or []) if x]
     return "+".join(cleaned) if cleaned else "rus+eng"
+
+
+_LANG_ALIASES = {
+    "ru": "rus",
+    "en": "eng",
+    "uk": "ukr",
+    "kz": "kaz",
+    "kk": "kaz",
+    "uz": "uzb",
+    "be": "bel",
+    "bg": "bul",
+}
+
+
+_EASYOCR_ALIASES = {
+    "rus": "ru",
+    "ru": "ru",
+    "eng": "en",
+    "en": "en",
+    "ukr": "uk",
+    "uk": "uk",
+    "bel": "be",
+    "be": "be",
+    "kaz": "kk",
+    "kk": "kk",
+    "kz": "kk",
+    "uzb": "uz",
+    "uz": "uz",
+    "bul": "bg",
+    "bg": "bg",
+}
+
+
+def _normalize_langs(langs: list[str]) -> list[str]:
+    """Преобразует коды языков к формату Tesseract и убирает дубли."""
+    normalized: list[str] = []
+    for lang in langs:
+        key = lang.lower()
+        norm = _LANG_ALIASES.get(key, lang)
+        if norm not in normalized:
+            normalized.append(norm)
+    return normalized
+
+
+def _normalize_easyocr_langs(langs: list[str]) -> list[str]:
+    """Готовит список языков к формату EasyOCR (двухбуквенные коды)."""
+    normalized: list[str] = []
+    for lang in langs:
+        key = lang.lower()
+        if key in _EASYOCR_ALIASES:
+            norm = _EASYOCR_ALIASES[key]
+        elif len(key) == 3 and key.isalpha():
+            norm = key[:2]
+        else:
+            norm = key
+        if norm not in normalized:
+            normalized.append(norm)
+    return normalized
 
 
 def _try_ocrmypdf_preprocess(
@@ -305,8 +375,10 @@ def _try_ocrmypdf_preprocess(
             "--deskew",
             "--clean",
             "--remove-background",
-            "--optimize", "3",
-            "--language", _langs_join(langs),
+            "--optimize",
+            "3",
+            "--language",
+            _langs_join(langs),
             in_path,
             out_path,
         ]
@@ -366,10 +438,9 @@ def _detect_and_remove_repeating_header(md_text: str) -> tuple[str, int]:
         if cnt < min_repeats or len(norm) < min_length:
             continue
         has_kw = any(k in norm for k in org_keywords)
-        up_ratio = (
-            sum(1 for ch in norm if "A" <= ch <= "Z" or "А" <= ch <= "Я") /
-            max(1, len(norm.replace(" ", "")))
-        )
+        up_ratio = sum(
+            1 for ch in norm if "A" <= ch <= "Z" or "А" <= ch <= "Я"
+        ) / max(1, len(norm.replace(" ", "")))
         if has_kw or up_ratio > up_thresh:
             candidates.add(norm)
     if not candidates:
@@ -427,7 +498,7 @@ def _remove_first_page_header(md_text: str) -> tuple[str, int]:
 
     # Собираем верхний непустой блок
     top: list[str] = []
-    for i, ln in enumerate(lines[: lines_limit]):
+    for i, ln in enumerate(lines[:lines_limit]):
         if ln.strip() == "":
             break
         top.append(ln)
@@ -459,6 +530,7 @@ def build_pdf_converter(
     force_ocr: bool,
     langs: list[str],
     table_mode: str,
+    ocr_engine: str = "tesseract",
 ) -> Any:
     """Собирает DocumentConverter для PDF/изображений.
 
@@ -475,6 +547,7 @@ def build_pdf_converter(
 
     # Lazy import docling internals
     import importlib
+
     dc_mod = importlib.import_module("docling.document_converter")
     dm_base = importlib.import_module("docling.datamodel.base_models")
     pipe_mod = importlib.import_module("docling.datamodel.pipeline_options")
@@ -483,6 +556,7 @@ def build_pdf_converter(
     InputFormat = getattr(dm_base, "InputFormat")
     PdfPipelineOptions = getattr(pipe_mod, "PdfPipelineOptions")
     TesseractCliOcrOptions = getattr(pipe_mod, "TesseractCliOcrOptions")
+    EasyOcrOptions = getattr(pipe_mod, "EasyOcrOptions")
     TableFormerMode = getattr(pipe_mod, "TableFormerMode")
 
     pipe = PdfPipelineOptions(artifacts_path=DOCLING_ARTIFACTS_PATH)
@@ -491,10 +565,17 @@ def build_pdf_converter(
     # for a true baseline without OCR.
     if force_ocr:
         pipe.do_ocr = True
-        ocr_opts = TesseractCliOcrOptions(
-            lang=langs,
-            force_full_page_ocr=True,
-        )
+        if ocr_engine == "easyocr":
+            easy_langs = _normalize_easyocr_langs(langs)
+            ocr_opts = EasyOcrOptions(
+                lang=easy_langs,
+                force_full_page_ocr=True,
+            )
+        else:
+            ocr_opts = TesseractCliOcrOptions(
+                lang=langs,
+                force_full_page_ocr=True,
+            )
         pipe.ocr_options = ocr_opts
     else:
         pipe.do_ocr = False
@@ -520,6 +601,7 @@ class ConvertResponse(BaseModel):
         content_json: JSON-структура (если запрошено).
         meta: Метаданные о запросе/обработке.
     """
+
     content_markdown: Optional[str] = None
     content_json: Optional[dict] = None
     meta: dict
@@ -554,7 +636,7 @@ def _split_code_fences(text: str) -> list[tuple[str, bool]]:
     last = 0
     for m in fence_re.finditer(text):
         if m.start() > last:
-            parts.append((text[last:m.start()], False))
+            parts.append((text[last : m.start()], False))
         parts.append((m.group(1), True))
         last = m.end()
     if last < len(text):
@@ -726,6 +808,7 @@ def _init_models_on_startup() -> None:
         # Don't crash the app on startup; convert() will try again if needed
         pass
 
+
 # Универсальный эндпоинт: автоопределение + конвертация legacy +
 # OCR без перебора PSM
 
@@ -734,7 +817,7 @@ def _init_models_on_startup() -> None:
 async def convert_universal(
     file: UploadFile = File(...),
     out: Literal["markdown", "json", "both"] = Form("both"),
-    langs: Optional[str] = Form(None),              # "rus,eng" | "auto"
+    langs: Optional[str] = Form(None),  # "rus,eng" | "auto"
     max_pages: Optional[int] = Form(None),
 ):
     """Универсальная конвертация документов с авто-стратегией.
@@ -766,15 +849,18 @@ async def convert_universal(
 
     filename = file.filename or "upload.bin"
     lower = filename.lower()
-    _langs = [
-        x.strip()
-        for x in (langs or ",".join(DEFAULT_LANGS)).split(",")
-        if x.strip()
-    ]
+    _langs = _normalize_langs(
+        [
+            x.strip()
+            for x in (langs or ",".join(DEFAULT_LANGS)).split(",")
+            if x.strip()
+        ]
+    )
 
     # Local helper to build a Docling stream lazily
     def _mk_stream(name: str, data: bytes):
         import importlib
+
         dm_base = importlib.import_module("docling.datamodel.base_models")
         DocumentStream = getattr(dm_base, "DocumentStream")
         return DocumentStream(name=name, stream=io.BytesIO(data))
@@ -842,7 +928,7 @@ async def convert_universal(
         in_bytes = raw
         converted = False
         if is_legacy(lower):
-            suffix = lower[lower.rfind("."):] if "." in lower else ".bin"
+            suffix = lower[lower.rfind(".") :] if "." in lower else ".bin"
             fd, tmp_in = tempfile.mkstemp(suffix=suffix)
             os.write(fd, raw)
             os.close(fd)
@@ -886,7 +972,7 @@ async def convert_universal(
         # 2) PDF/изображение → стратегии: no-force-OCR vs force-OCR
         if is_pdf(lower) or is_image(lower):
             best_doc = None
-            best_tag = None   # 'no_ocr' | 'force_ocr'
+            best_tag = None  # 'no_ocr' | 'force_ocr'
             best_score = -1.0
 
             # (a) Без принудительного OCR; для PDF попробуем OCRmyPDF
@@ -930,9 +1016,7 @@ async def convert_universal(
             total_no = len(text_no)
             if total_no > 0:
                 cyr_no = sum(
-                    1
-                    for ch in text_no
-                    if ("А" <= ch <= "я") or ch in "Ёё"
+                    1 for ch in text_no if ("А" <= ch <= "я") or ch in "Ёё"
                 )
                 cyr_ratio_no = cyr_no / total_no
                 score_no = total_no * (0.6 + 0.4 * cyr_ratio_no)
@@ -970,12 +1054,14 @@ async def convert_universal(
                     else ""
                 )
                 if isinstance(md_force, str):
-                    md_force, header_removed_force = (
-                        _detect_and_remove_repeating_header(md_force)
-                    )
-                    md_force, header_removed_first_force = (
-                        _remove_first_page_header(md_force)
-                    )
+                    (
+                        md_force,
+                        header_removed_force,
+                    ) = _detect_and_remove_repeating_header(md_force)
+                    (
+                        md_force,
+                        header_removed_first_force,
+                    ) = _remove_first_page_header(md_force)
                 else:
                     header_removed_force = 0
                     header_removed_first_force = 0
@@ -1008,6 +1094,65 @@ async def convert_universal(
             except Exception as e:
                 trials.append({"strategy": "force_ocr", "error": str(e)})
 
+            # (в) Принудительный OCR через EasyOCR
+            try:
+                conv_easy = build_pdf_converter(
+                    force_ocr=True,
+                    langs=_langs,
+                    table_mode=DEFAULT_TABLE_MODE,
+                    ocr_engine="easyocr",
+                )
+                res_easy = conv_easy.convert(
+                    _mk_stream("easyocr-" + filename, in_bytes),
+                    **_conv_kwargs,
+                )
+                doc_easy = res_easy.document
+                md_easy = (
+                    doc_easy.export_to_markdown()
+                    if out in ("markdown", "both")
+                    else ""
+                )
+                if isinstance(md_easy, str):
+                    (
+                        md_easy,
+                        header_removed_easy,
+                    ) = _detect_and_remove_repeating_header(md_easy)
+                    (
+                        md_easy,
+                        header_removed_first_easy,
+                    ) = _remove_first_page_header(md_easy)
+                else:
+                    header_removed_easy = 0
+                    header_removed_first_easy = 0
+                text_easy = md_easy if isinstance(md_easy, str) else ""
+                total_e = len(text_easy)
+                if total_e > 0:
+                    cyr_e = sum(
+                        1
+                        for ch in text_easy
+                        if ("А" <= ch <= "я") or ch in "Ёё"
+                    )
+                    cyr_ratio_e = cyr_e / total_e
+                    score_e = total_e * (0.6 + 0.4 * cyr_ratio_e)
+                else:
+                    cyr_ratio_e, score_e = 0.0, 0.0
+                trials.append(
+                    {
+                        "strategy": "easyocr",
+                        "length": total_e,
+                        "cyr_ratio": round(cyr_ratio_e, 3),
+                        "score": round(score_e, 3),
+                        "header_removed": header_removed_easy,
+                        "first_header_removed": header_removed_first_easy,
+                    }
+                )
+                if score_e > best_score:
+                    best_score = score_e
+                    best_tag = "easyocr"
+                    best_doc = doc_easy
+            except Exception as e:
+                trials.append({"strategy": "easyocr", "error": str(e)})
+
             if best_doc is None:
                 raise HTTPException(500, detail="All strategies failed")
             md = (
@@ -1016,20 +1161,22 @@ async def convert_universal(
                 else None
             )
             js = best_doc.export_to_dict() if out in ("json", "both") else None
-            return JSONResponse(content={
-                "best_strategy": best_tag,
-                "trials": trials,
-                "content_markdown": md,
-                "content_json": js,
-                "meta": {
-                    "filename": file.filename,
-                    "size_bytes": len(raw),
-                    "converted": converted,
-                    "out": out,
-                    "langs": ",".join(_langs),
-                    "max_pages": max_pages,
+            return JSONResponse(
+                content={
+                    "best_strategy": best_tag,
+                    "trials": trials,
+                    "content_markdown": md,
+                    "content_json": js,
+                    "meta": {
+                        "filename": file.filename,
+                        "size_bytes": len(raw),
+                        "converted": converted,
+                        "out": out,
+                        "langs": ",".join(_langs),
+                        "max_pages": max_pages,
+                    },
                 }
-            })
+            )
 
         # 3) OOXML/HTML/MD/CSV → прямо через Docling,
         #    при ошибке — fallback в PDF
@@ -1054,22 +1201,24 @@ async def convert_universal(
                 else None
             )
             js = dl_doc.export_to_dict() if out in ("json", "both") else None
-            return JSONResponse(content={
-                "content_markdown": md,
-                "content_json": js,
-                "meta": {
-                    "filename": file.filename,
-                    "size_bytes": len(raw),
-                    "converted": converted,
-                    "out": out,
-                    "langs": ",".join(_langs),
-                    "max_pages": max_pages,
+            return JSONResponse(
+                content={
+                    "content_markdown": md,
+                    "content_json": js,
+                    "meta": {
+                        "filename": file.filename,
+                        "size_bytes": len(raw),
+                        "converted": converted,
+                        "out": out,
+                        "langs": ",".join(_langs),
+                        "max_pages": max_pages,
+                    },
                 }
-            })
+            )
         except Exception:
             # Пытаемся через LibreOffice → PDF и затем PDF-пайплайн
             try:
-                suffix = lower[lower.rfind("."):] if "." in lower else ".bin"
+                suffix = lower[lower.rfind(".") :] if "." in lower else ".bin"
                 fd, tmp_in2 = tempfile.mkstemp(suffix=suffix)
                 os.write(fd, in_bytes)
                 os.close(fd)
@@ -1126,9 +1275,10 @@ async def convert_universal(
                     else ""
                 )
                 if isinstance(md_no2, str):
-                    md_no2, header_removed_no2 = (
-                        _detect_and_remove_repeating_header(md_no2)
-                    )
+                    (
+                        md_no2,
+                        header_removed_no2,
+                    ) = _detect_and_remove_repeating_header(md_no2)
                 else:
                     header_removed_no2 = 0
                 text_no2 = md_no2 if isinstance(md_no2, str) else ""
@@ -1174,9 +1324,10 @@ async def convert_universal(
                         else ""
                     )
                     if isinstance(md_force2, str):
-                        md_force2, header_removed_force2 = (
-                            _detect_and_remove_repeating_header(md_force2)
-                        )
+                        (
+                            md_force2,
+                            header_removed_force2,
+                        ) = _detect_and_remove_repeating_header(md_force2)
                     else:
                         header_removed_force2 = 0
                     text_force2 = (
@@ -1209,6 +1360,58 @@ async def convert_universal(
                 except Exception as e:
                     trials2.append({"strategy": "force_ocr", "error": str(e)})
 
+                try:
+                    conv_easy2 = build_pdf_converter(
+                        force_ocr=True,
+                        langs=_langs,
+                        table_mode=DEFAULT_TABLE_MODE,
+                        ocr_engine="easyocr",
+                    )
+                    res_easy2 = conv_easy2.convert(
+                        _mk_stream("fallback-easy.pdf", pdf_bytes),
+                        **_conv_kwargs2,
+                    )
+                    doc_easy2 = res_easy2.document
+                    md_easy2 = (
+                        doc_easy2.export_to_markdown()
+                        if out in ("markdown", "both")
+                        else ""
+                    )
+                    if isinstance(md_easy2, str):
+                        (
+                            md_easy2,
+                            header_removed_easy2,
+                        ) = _detect_and_remove_repeating_header(md_easy2)
+                    else:
+                        header_removed_easy2 = 0
+                    text_easy2 = md_easy2 if isinstance(md_easy2, str) else ""
+                    total_e2 = len(text_easy2)
+                    if total_e2 > 0:
+                        cyr_e2 = sum(
+                            1
+                            for ch in text_easy2
+                            if ("А" <= ch <= "я") or ch in "Ёё"
+                        )
+                        cyr_ratio_e2 = cyr_e2 / total_e2
+                        score_e2 = total_e2 * (0.6 + 0.4 * cyr_ratio_e2)
+                    else:
+                        cyr_ratio_e2, score_e2 = 0.0, 0.0
+                    trials2.append(
+                        {
+                            "strategy": "easyocr",
+                            "length": total_e2,
+                            "cyr_ratio": round(cyr_ratio_e2, 3),
+                            "score": round(score_e2, 3),
+                            "header_removed": header_removed_easy2,
+                        }
+                    )
+                    if score_e2 > best_score:
+                        best_doc = doc_easy2
+                        best_tag = "easyocr"
+                        best_score = score_e2
+                except Exception as e:
+                    trials2.append({"strategy": "easyocr", "error": str(e)})
+
                 if best_doc is None:
                     raise HTTPException(
                         500, detail="Fallback strategies failed"
@@ -1224,20 +1427,22 @@ async def convert_universal(
                     if out in ("json", "both")
                     else None
                 )
-                return JSONResponse(content={
-                    "best_strategy": best_tag,
-                    "trials": trials2,
-                    "content_markdown": md,
-                    "content_json": js,
-                    "meta": {
-                        "filename": file.filename,
-                        "size_bytes": len(raw),
-                        "converted": True,
-                        "out": out,
-                        "langs": ",".join(_langs),
-                        "max_pages": max_pages,
+                return JSONResponse(
+                    content={
+                        "best_strategy": best_tag,
+                        "trials": trials2,
+                        "content_markdown": md,
+                        "content_json": js,
+                        "meta": {
+                            "filename": file.filename,
+                            "size_bytes": len(raw),
+                            "converted": True,
+                            "out": out,
+                            "langs": ",".join(_langs),
+                            "max_pages": max_pages,
+                        },
                     }
-                })
+                )
             except Exception as e:
                 raise HTTPException(500, detail=str(e))
     finally:

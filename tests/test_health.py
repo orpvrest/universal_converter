@@ -1,5 +1,4 @@
 """Тесты для здоровья API."""
-import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
@@ -18,7 +17,7 @@ def test_openapi_schema():
     """Проверка доступности OpenAPI схемы."""
     response = client.get("/openapi.json")
     assert response.status_code == 200
-    
+
     schema = response.json()
     assert "openapi" in schema
     assert "/health" in schema["paths"]
